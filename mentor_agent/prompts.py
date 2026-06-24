@@ -1,10 +1,6 @@
-"""Versioned extraction rules and soft taxonomy for mentor extraction V1.
+"""Versioned extraction prompt, rules, and soft taxonomy."""
 
-Stage 1 stores the contract constants only. Model invocation is introduced in a
-later stage.
-"""
-
-PROMPT_VERSION = "mentor-extraction-v1"
+PROMPT_VERSION = "mentor-extraction-v1.1"
 INDUSTRY_TAXONOMY_VERSION = "industry-soft-v1"
 
 
@@ -136,12 +132,32 @@ EXTRACTION_EXAMPLES = (
 )
 
 
+MENTOR_EXTRACTION_SYSTEM_PROMPT = """
+你负责从单条导师资料中抽取结构化信息。严格遵守以下要求：
+1. 只输出一个合法 JSON 对象，不要 Markdown，不要 ```json 代码块，不要解释过程。
+2. 不编造、不补全原文不存在的信息。每个抽取项必须尽量提供 source_field 和连续原文 quote 作为 evidence。
+3. confidence 只能是 high、medium、low。
+4. relationship 只能是 employer、client、project、partner、unknown。
+5. mapping_status 只能是 mapped、unmapped、ambiguous。
+6. employer 仅用于明确任职关系；“服务过”“客户包括”“合作过”不能判为 employer。
+7. 行业分类是 soft taxonomy。列表外行业保留 raw，使用 unmapped，不得硬塞到近似类别。
+8. 技能允许自由抽取，不使用固定技能词表，也不能仅根据职位推导技能。
+9. “搭建认证体系”不代表本人持有证书；“准 PCC”不能标为 held，应标为 candidate。
+10. match_type 由程序计算；模型可以省略或设为 null，不得自行声称 evidence 已验证。
+
+soft industry taxonomy：{json_taxonomy}
+""".strip().format(
+    json_taxonomy="、".join(SOFT_INDUSTRY_TAXONOMY)
+)
+
+
 __all__ = [
     "CONFIDENCE_RULES",
     "CREDENTIAL_RULES",
     "EXTRACTION_EXAMPLES",
     "INDUSTRY_TAXONOMY_VERSION",
     "MAPPING_STATUS_RULES",
+    "MENTOR_EXTRACTION_SYSTEM_PROMPT",
     "ORGANIZATION_RELATIONSHIP_RULES",
     "PROMPT_VERSION",
     "SKILL_EXTRACTION_RULES",

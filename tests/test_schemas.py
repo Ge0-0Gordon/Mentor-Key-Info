@@ -257,7 +257,7 @@ def test_result_root_rejects_secret_fields(secret_field: str) -> None:
 
 
 def test_prompt_constants_cover_stage1_contract() -> None:
-    assert PROMPT_VERSION == "mentor-extraction-v1"
+    assert PROMPT_VERSION == "mentor-extraction-v1.1"
     assert INDUSTRY_TAXONOMY_VERSION == "industry-soft-v1"
     assert len(SOFT_INDUSTRY_TAXONOMY) == 30
     assert len(set(SOFT_INDUSTRY_TAXONOMY)) == 30
