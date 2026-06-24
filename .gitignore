@@ -1,0 +1,28 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Vendored/build dependencies
+python/
+
+# Generated outputs and logs
+outputs/
+logs/
+*.log
+
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Private source data and spreadsheet lock files
+/职优越导师资料（最新）.xlsx
+~$*.xlsx
+
+# Temporary and OS-generated files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+__MACOSX/
