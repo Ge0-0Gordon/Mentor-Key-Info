@@ -9,7 +9,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 
 import requests
 from openpyxl import Workbook
@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from mentor_agent.excel_io import ExcelLoadReport, load_mentor_inputs_with_report
 from mentor_agent.schemas import MentorInput, MentorResult
+from mentor_agent.simple_schemas import SimpleMentorBatchResult, SimpleMentorResult
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:9000"
@@ -27,6 +28,10 @@ SUCCESS_CHECKPOINT_RELATIVE = Path("checkpoints") / "success_rows.jsonl"
 FINAL_RESULTS_NAME = "mentor_results.jsonl"
 FAILED_ROWS_NAME = "failed_rows.jsonl"
 REVIEW_EXCEL_NAME = "mentor_review.xlsx"
+EXTRACTION_MODES = ("simple", "full")
+
+ExtractionMode = Literal["simple", "full"]
+ExtractionResult = SimpleMentorResult | MentorResult
 
 REVIEW_SHEETS = (
     "导师总览",
@@ -40,6 +45,7 @@ REVIEW_SHEETS = (
     "质量问题",
     "处理失败",
 )
+SIMPLE_REVIEW_SHEETS = ("导师总览", "关键词明细", "处理失败")
 
 _SENSITIVE_PATTERN = re.compile(
     r"(?i)(access\s*key|accesskey|api\s*key|authorization|\.env|token)"
@@ -62,6 +68,8 @@ class BatchConfig:
     retry_sleep: float = 1.0
     no_excel: bool = False
     verbose: bool = False
+    mode: ExtractionMode = "simple"
+    batch_size: int = 10
 
 
 @dataclass(frozen=True)
@@ -130,6 +138,13 @@ def _non_negative_float(value: str) -> float:
     return parsed
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return parsed
+
+
 def _endpoint(base_url: str) -> str:
     return base_url.rstrip("/") + "/openai/v1/chat/completions"
 
@@ -149,11 +164,21 @@ def _response_error(
     )
 
 
+def _result_model_for_mode(mode: ExtractionMode) -> type[ExtractionResult]:
+    if mode == "simple":
+        return SimpleMentorResult
+    if mode == "full":
+        return MentorResult
+    raise ValueError("mode must be 'simple' or 'full'")
+
+
 def _parse_http_response(
     response: Any,
     mentor_input: MentorInput,
     attempt_count: int,
-) -> MentorResult:
+    *,
+    mode: ExtractionMode,
+) -> ExtractionResult:
     status_code = int(response.status_code)
     if not 200 <= status_code < 300:
         retriable = status_code == 429 or status_code >= 500
@@ -207,16 +232,17 @@ def _parse_http_response(
     except json.JSONDecodeError:
         raise _response_error(
             "invalid_mentor_result_json",
-            "message content was not valid MentorResult JSON",
+            "message content was not valid mentor result JSON",
             attempt_count,
         ) from None
 
+    result_model = _result_model_for_mode(mode)
     try:
-        result = MentorResult.model_validate(result_payload)
+        result = result_model.model_validate(result_payload)
     except ValidationError as exc:
         raise _response_error(
             "mentor_result_validation_failed",
-            f"MentorResult failed schema validation ({exc.error_count()} error(s))",
+            f"{result_model.__name__} failed schema validation ({exc.error_count()} error(s))",
             attempt_count,
         ) from None
 
@@ -232,6 +258,94 @@ def _parse_http_response(
     return result
 
 
+def _parse_http_batch_response(
+    response: Any,
+    mentor_inputs: list[MentorInput],
+    attempt_count: int,
+) -> list[SimpleMentorResult]:
+    status_code = int(response.status_code)
+    if not 200 <= status_code < 300:
+        retriable = status_code == 429 or status_code >= 500
+        raise _response_error(
+            "http_status_error",
+            f"local service returned HTTP {status_code}",
+            attempt_count,
+            retriable=retriable,
+        )
+
+    try:
+        payload = response.json()
+    except (ValueError, json.JSONDecodeError):
+        raise _response_error(
+            "invalid_response_shape",
+            "local service response was not valid JSON",
+            attempt_count,
+        ) from None
+
+    if not isinstance(payload, Mapping):
+        raise _response_error(
+            "invalid_response_shape",
+            "local service JSON response was not an object",
+            attempt_count,
+        )
+    if "error" in payload:
+        raise _response_error(
+            "invalid_response_shape",
+            "local service returned an error object",
+            attempt_count,
+        )
+
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise _response_error(
+            "missing_message_content",
+            "response did not contain choices[0].message.content",
+            attempt_count,
+        ) from None
+
+    if not isinstance(content, str) or not content.strip():
+        raise _response_error(
+            "missing_message_content",
+            "choices[0].message.content was empty or not text",
+            attempt_count,
+        )
+
+    try:
+        result_payload = json.loads(content)
+    except json.JSONDecodeError:
+        raise _response_error(
+            "invalid_mentor_result_json",
+            "message content was not valid simple batch result JSON",
+            attempt_count,
+        ) from None
+
+    try:
+        batch_result = SimpleMentorBatchResult.model_validate(result_payload)
+    except ValidationError as exc:
+        raise _response_error(
+            "mentor_result_validation_failed",
+            f"SimpleMentorBatchResult failed schema validation ({exc.error_count()} error(s))",
+            attempt_count,
+        ) from None
+
+    expected = {
+        (mentor_input.mentor_id, mentor_input.record_hash)
+        for mentor_input in mentor_inputs
+    }
+    actual = {
+        (result.mentor_id, result.record_hash)
+        for result in batch_result.results
+    }
+    if actual != expected or len(batch_result.results) != len(mentor_inputs):
+        raise _response_error(
+            "mentor_result_validation_failed",
+            "SimpleMentorBatchResult identities did not match requested MentorInputs",
+            attempt_count,
+        )
+    return batch_result.results
+
+
 def request_mentor_result(
     mentor_input: MentorInput,
     *,
@@ -240,8 +354,9 @@ def request_mentor_result(
     max_retries: int,
     retry_sleep: float,
     session: Any,
+    mode: ExtractionMode,
     sleep_fn: Callable[[float], None] = time.sleep,
-) -> MentorResult:
+) -> ExtractionResult:
     """Call one mentor endpoint with bounded retries and classified failures."""
 
     request_body = {
@@ -264,7 +379,12 @@ def request_mentor_result(
                 headers=headers,
                 timeout=timeout,
             )
-            return _parse_http_response(response, mentor_input, attempt_count)
+            return _parse_http_response(
+                response,
+                mentor_input,
+                attempt_count,
+                mode=mode,
+            )
         except requests.Timeout:
             last_error = BatchItemError(
                 "timeout",
@@ -304,23 +424,118 @@ def request_mentor_result(
     raise RuntimeError("unreachable request retry state")
 
 
+def request_simple_mentor_results_batch(
+    mentor_inputs: list[MentorInput],
+    *,
+    base_url: str,
+    timeout: float,
+    max_retries: int,
+    retry_sleep: float,
+    session: Any,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> list[SimpleMentorResult]:
+    """Call the simple batch endpoint with bounded retries."""
+
+    request_body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "task": "extract_mentor_keywords_batch_simple",
+                        "records": [
+                            mentor_input.model_dump(by_alias=True, mode="json")
+                            for mentor_input in mentor_inputs
+                        ],
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            }
+        ],
+        "stream": False,
+    }
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    last_error: BatchItemError | None = None
+
+    for attempt_count in range(1, max_retries + 2):
+        try:
+            response = session.post(
+                _endpoint(base_url),
+                json=request_body,
+                headers=headers,
+                timeout=timeout,
+            )
+            return _parse_http_batch_response(
+                response,
+                mentor_inputs,
+                attempt_count,
+            )
+        except requests.Timeout:
+            last_error = BatchItemError(
+                "timeout",
+                "local mentor service batch request timed out",
+                attempt_count=attempt_count,
+                retriable=True,
+                stage="http_extract_batch",
+            )
+        except requests.ConnectionError:
+            last_error = BatchItemError(
+                "connection_error",
+                "could not connect to the local mentor service",
+                attempt_count=attempt_count,
+                retriable=True,
+                stage="http_extract_batch",
+            )
+        except requests.RequestException:
+            last_error = BatchItemError(
+                "http_request_failed",
+                "local mentor service batch request failed",
+                attempt_count=attempt_count,
+                retriable=True,
+                stage="http_extract_batch",
+            )
+        except BatchItemError as exc:
+            last_error = exc
+            last_error.stage = "http_extract_batch"
+        except Exception:
+            last_error = BatchItemError(
+                "unexpected_error",
+                "unexpected error during local mentor service batch request",
+                attempt_count=attempt_count,
+                retriable=False,
+                stage="http_extract_batch",
+            )
+
+        if not last_error.retriable or attempt_count > max_retries:
+            raise last_error
+        if retry_sleep:
+            sleep_fn(retry_sleep)
+
+    raise RuntimeError("unreachable batch request retry state")
+
+
 def load_success_checkpoint(
     path: Path,
     *,
+    mode: ExtractionMode,
     warn: Callable[[str], None] = print,
-) -> dict[tuple[str, str], MentorResult]:
-    successes: dict[tuple[str, str], MentorResult] = {}
+) -> dict[tuple[str, str], ExtractionResult]:
+    successes: dict[tuple[str, str], ExtractionResult] = {}
     if not path.exists():
         return successes
 
+    result_model = _result_model_for_mode(mode)
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
             try:
-                result = MentorResult.model_validate_json(line)
+                result = result_model.model_validate_json(line)
             except (ValidationError, ValueError):
-                warn(f"warning: skipped invalid checkpoint line {line_number}")
+                warn(
+                    f"warning: skipped invalid or mismatched {mode} checkpoint line {line_number}"
+                )
                 continue
             successes[(result.mentor_id, result.record_hash)] = result
     return successes
@@ -379,7 +594,7 @@ def _excel_failure_records(report: ExcelLoadReport) -> list[dict[str, Any]]:
     return records
 
 
-def _write_final_results(path: Path, results: Iterable[MentorResult]) -> None:
+def _write_final_results(path: Path, results: Iterable[ExtractionResult]) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         for result in results:
             handle.write(result.model_dump_json(by_alias=True) + "\n")
@@ -750,6 +965,140 @@ def write_review_excel(
     workbook.save(path)
 
 
+def _join_keywords(values: list[str]) -> str:
+    return "；".join(values)
+
+
+def write_simple_review_excel(
+    path: Path,
+    results: list[SimpleMentorResult],
+    failures: list[dict[str, Any]],
+) -> None:
+    """Create a compact simple-mode review workbook."""
+
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+
+    overview_rows = []
+    detail_rows = []
+    categories = (
+        "industries",
+        "companies",
+        "roles",
+        "skills",
+        "credentials",
+        "education",
+        "target_mentees",
+        "highlights",
+        "keywords",
+    )
+
+    for result in results:
+        original = result.original_fields
+        extraction = result.extraction
+        overview_rows.append(
+            [
+                result.mentor_id,
+                original.mentor_name,
+                original.gender,
+                original.city,
+                original.career_years,
+                original.industry_tags,
+                _join_keywords(extraction.industries),
+                _join_keywords(extraction.companies),
+                _join_keywords(extraction.roles),
+                _join_keywords(extraction.skills),
+                _join_keywords(extraction.credentials),
+                _join_keywords(extraction.education),
+                _join_keywords(extraction.target_mentees),
+                _join_keywords(extraction.highlights),
+                _join_keywords(extraction.keywords),
+                extraction.summary,
+                result.processing.latency_ms,
+                result.processing.attempt_count,
+            ]
+        )
+        for category in categories:
+            for keyword in getattr(extraction, category):
+                detail_rows.append(
+                    [
+                        result.mentor_id,
+                        original.mentor_name,
+                        category,
+                        keyword,
+                    ]
+                )
+
+    _add_sheet(
+        workbook,
+        "导师总览",
+        [
+            "mentor_id",
+            "导师姓名",
+            "性别",
+            "城市",
+            "职业年限",
+            "行业标签原文",
+            "industries",
+            "companies",
+            "roles",
+            "skills",
+            "credentials",
+            "education",
+            "target_mentees",
+            "highlights",
+            "keywords",
+            "summary",
+            "latency_ms",
+            "attempt_count",
+        ],
+        overview_rows,
+    )
+    _add_sheet(
+        workbook,
+        "关键词明细",
+        ["mentor_id", "导师姓名", "category", "keyword"],
+        detail_rows,
+    )
+    _add_sheet(
+        workbook,
+        "处理失败",
+        [
+            "mentor_id",
+            "record_hash",
+            "source_file",
+            "source_sheet",
+            "source_row",
+            "error_type",
+            "sanitized_error_message",
+            "attempt_count",
+            "failed_at",
+            "retriable",
+            "stage",
+        ],
+        (
+            [
+                failure.get("mentor_id"),
+                failure.get("record_hash"),
+                failure.get("source_file"),
+                failure.get("source_sheet"),
+                failure.get("source_row"),
+                failure.get("error_type"),
+                sanitize_error_message(
+                    str(failure.get("sanitized_error_message", ""))
+                ),
+                failure.get("attempt_count"),
+                failure.get("failed_at"),
+                failure.get("retriable"),
+                failure.get("stage"),
+            ]
+            for failure in failures
+        ),
+    )
+
+    workbook.save(path)
+
+
 def _validate_config(config: BatchConfig) -> None:
     if config.resume and config.force:
         raise ValueError("resume and force are mutually exclusive")
@@ -763,6 +1112,18 @@ def _validate_config(config: BatchConfig) -> None:
         raise ValueError("max_retries must be >= 0")
     if config.retry_sleep < 0:
         raise ValueError("retry_sleep must be >= 0")
+    if config.mode not in EXTRACTION_MODES:
+        raise ValueError("mode must be 'simple' or 'full'")
+    if config.batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+
+
+def _chunks(
+    items: list[tuple[int, MentorInput]],
+    size: int,
+) -> Iterable[list[tuple[int, MentorInput]]]:
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
 
 
 def run_batch(
@@ -802,7 +1163,11 @@ def run_batch(
     final_path = config.output_dir / FINAL_RESULTS_NAME
     review_path = config.output_dir / REVIEW_EXCEL_NAME
 
-    checkpoint_results = load_success_checkpoint(checkpoint_path, warn=printer)
+    checkpoint_results = load_success_checkpoint(
+        checkpoint_path,
+        mode=config.mode,
+        warn=printer,
+    )
     failed_current_keys: set[tuple[str, str]] = set()
     excel_failure_records = _excel_failure_records(report)
     success_count = 0
@@ -817,6 +1182,7 @@ def run_batch(
             _append_json_line(failed_handle, record)
 
         total_selected = len(selected)
+        pending: list[tuple[int, MentorInput]] = []
         for index, mentor_input in enumerate(selected, start=1):
             key = (mentor_input.mentor_id, mentor_input.record_hash)
             if config.resume and key in checkpoint_results:
@@ -825,7 +1191,11 @@ def run_batch(
                     f"[{index}/{total_selected}] {mentor_input.mentor_id} skipped resume"
                 )
                 continue
+            pending.append((index, mentor_input))
 
+        def process_single(index: int, mentor_input: MentorInput) -> None:
+            nonlocal success_count, failed_count
+            key = (mentor_input.mentor_id, mentor_input.record_hash)
             try:
                 result = request_mentor_result(
                     mentor_input,
@@ -834,6 +1204,7 @@ def run_batch(
                     max_retries=config.max_retries,
                     retry_sleep=config.retry_sleep,
                     session=http_session,
+                    mode=config.mode,
                     sleep_fn=sleep_fn,
                 )
             except BatchItemError as exc:
@@ -844,7 +1215,7 @@ def run_batch(
                     f"[{index}/{total_selected}] {mentor_input.mentor_id} "
                     f"failed error_type={exc.error_type}"
                 )
-                continue
+                return
             except Exception:
                 failed_count += 1
                 failed_current_keys.add(key)
@@ -860,7 +1231,7 @@ def run_batch(
                     f"[{index}/{total_selected}] {mentor_input.mentor_id} "
                     "failed error_type=unexpected_error"
                 )
-                continue
+                return
 
             success_count += 1
             checkpoint_results[key] = result
@@ -873,7 +1244,65 @@ def run_batch(
                 f"success latency={result.processing.latency_ms}"
             )
 
-    final_results = []
+        def record_batch_success(
+            index: int,
+            mentor_input: MentorInput,
+            result: SimpleMentorResult,
+        ) -> None:
+            nonlocal success_count
+            key = (mentor_input.mentor_id, mentor_input.record_hash)
+            success_count += 1
+            checkpoint_results[key] = result
+            _append_json_line(
+                success_handle,
+                result.model_dump_json(by_alias=True),
+            )
+            printer(
+                f"[{index}/{total_selected}] {mentor_input.mentor_id} "
+                f"success latency={result.processing.latency_ms}"
+            )
+
+        if config.mode == "simple" and config.batch_size > 1:
+            for group in _chunks(pending, config.batch_size):
+                group_inputs = [mentor_input for _, mentor_input in group]
+                try:
+                    batch_results = request_simple_mentor_results_batch(
+                        group_inputs,
+                        base_url=config.base_url,
+                        timeout=config.timeout,
+                        max_retries=config.max_retries,
+                        retry_sleep=config.retry_sleep,
+                        session=http_session,
+                        sleep_fn=sleep_fn,
+                    )
+                    results_by_id = {
+                        result.mentor_id: result for result in batch_results
+                    }
+                    for index, mentor_input in group:
+                        record_batch_success(
+                            index,
+                            mentor_input,
+                            results_by_id[mentor_input.mentor_id],
+                        )
+                except BatchItemError as exc:
+                    printer(
+                        f"batch fallback size={len(group)} "
+                        f"error_type={exc.error_type}"
+                    )
+                    for index, mentor_input in group:
+                        process_single(index, mentor_input)
+                except Exception:
+                    printer(
+                        f"batch fallback size={len(group)} "
+                        "error_type=unexpected_error"
+                    )
+                    for index, mentor_input in group:
+                        process_single(index, mentor_input)
+        else:
+            for index, mentor_input in pending:
+                process_single(index, mentor_input)
+
+    final_results: list[ExtractionResult] = []
     for mentor_input in all_inputs:
         key = (mentor_input.mentor_id, mentor_input.record_hash)
         if key in failed_current_keys:
@@ -884,11 +1313,26 @@ def run_batch(
 
     _write_final_results(final_path, final_results)
     if not config.no_excel:
-        write_review_excel(
-            review_path,
-            final_results,
-            _read_failure_history(failed_path),
-        )
+        if config.mode == "simple":
+            write_simple_review_excel(
+                review_path,
+                [
+                    result
+                    for result in final_results
+                    if isinstance(result, SimpleMentorResult)
+                ],
+                _read_failure_history(failed_path),
+            )
+        else:
+            write_review_excel(
+                review_path,
+                [
+                    result
+                    for result in final_results
+                    if isinstance(result, MentorResult)
+                ],
+                _read_failure_history(failed_path),
+            )
 
     summary = BatchSummary(
         source_file=report.summary.source_file,
@@ -914,6 +1358,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--limit", type=_non_negative_int)
     parser.add_argument("--offset", type=_non_negative_int, default=0)
+    parser.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        default=10,
+        help="Simple-mode HTTP batch size; use 1 for single-record requests.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=EXTRACTION_MODES,
+        default="simple",
+        help="Result schema to expect from the local service.",
+    )
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--resume", action="store_true")
     mode_group.add_argument("--force", action="store_true")
@@ -942,6 +1398,8 @@ def main(argv: list[str] | None = None) -> int:
         retry_sleep=args.retry_sleep,
         no_excel=args.no_excel,
         verbose=args.verbose,
+        mode=args.mode,
+        batch_size=args.batch_size,
     )
     summary = run_batch(config)
     if not config.verbose and not config.dry_run:

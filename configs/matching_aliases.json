@@ -1,0 +1,63 @@
+{
+  "companies": [
+    {"canonical": "字节跳动", "aliases": ["字节", "ByteDance", "抖音", "今日头条"]},
+    {"canonical": "阿里巴巴", "aliases": ["阿里", "Alibaba", "淘宝", "天猫", "蚂蚁"]},
+    {"canonical": "腾讯", "aliases": ["Tencent", "微信", "腾讯云"]},
+    {"canonical": "美团", "aliases": ["美团点评"]},
+    {"canonical": "京东", "aliases": ["JD", "京东集团"]},
+    {"canonical": "百度", "aliases": ["Baidu"]},
+    {"canonical": "哔哩哔哩", "aliases": ["B站", "Bilibili", "哔哩"]},
+    {"canonical": "快手", "aliases": ["Kuaishou"]},
+    {"canonical": "滴滴", "aliases": ["滴滴出行", "DiDi"]},
+    {"canonical": "小红书", "aliases": ["RED"]},
+    {"canonical": "拼多多", "aliases": ["PDD"]},
+    {"canonical": "蔚来汽车", "aliases": ["蔚来", "NIO"]},
+    {"canonical": "华为", "aliases": ["Huawei"]},
+    {"canonical": "微软", "aliases": ["Microsoft"]},
+    {"canonical": "亚马逊", "aliases": ["Amazon", "AWS"]}
+  ],
+  "roles": [
+    {"canonical": "产品经理", "aliases": ["PM", "产品", "产品岗", "产品负责人"]},
+    {"canonical": "运营", "aliases": ["运营岗", "用户运营", "内容运营", "商业运营"]},
+    {"canonical": "战略", "aliases": ["战略岗", "战略分析", "商业分析", "业务分析"]},
+    {"canonical": "咨询", "aliases": ["咨询顾问", "管理咨询", "咨询岗"]},
+    {"canonical": "数据分析", "aliases": ["数据分析师", "商业分析师", "数据岗", "BI"]},
+    {"canonical": "市场营销", "aliases": ["市场", "营销", "品牌", "公关", "PR"]},
+    {"canonical": "销售", "aliases": ["销售岗", "BD", "商务拓展"]},
+    {"canonical": "HRBP", "aliases": ["HRG", "业务HR", "人力资源业务伙伴"]},
+    {"canonical": "招聘", "aliases": ["招聘岗", "招聘专家", "TA", "Talent Acquisition"]},
+    {"canonical": "培训发展", "aliases": ["培训", "学习发展", "L&D", "人才发展"]}
+  ],
+  "skills": [
+    {"canonical": "简历优化", "aliases": ["改简历", "简历修改", "简历诊断", "简历润色", "简历定制"]},
+    {"canonical": "模拟面试", "aliases": ["面试辅导", "面试训练", "Mock Interview", "mock interview"]},
+    {"canonical": "职业规划", "aliases": ["职业定位", "生涯规划", "职业发展", "求职规划"]},
+    {"canonical": "求职辅导", "aliases": ["求职陪跑", "求职指导", "上岸辅导"]},
+    {"canonical": "转行辅导", "aliases": ["转型辅导", "跨行", "转专业", "转轨"]},
+    {"canonical": "内推渠道", "aliases": ["内推", "推荐机会", "大厂渠道"]},
+    {"canonical": "面试官视角", "aliases": ["面试官", "用人标准", "招聘标准", "大厂用人"]},
+    {"canonical": "留学生求职", "aliases": ["海归求职", "海外学生求职"]},
+    {"canonical": "校招辅导", "aliases": ["校招", "秋招", "春招", "应届生求职"]},
+    {"canonical": "社招辅导", "aliases": ["社招", "跳槽", "在职求职"]}
+  ],
+  "stages": [
+    {"canonical": "应届生", "aliases": ["校招生", "毕业生", "new grad", "New Grad"]},
+    {"canonical": "留学生", "aliases": ["海归", "海外学生", "海外留学生"]},
+    {"canonical": "P5-P6专员级", "aliases": ["P5", "P6", "专员", "初中级"]},
+    {"canonical": "P7专家", "aliases": ["P7", "专家", "资深"]},
+    {"canonical": "P8以上总监", "aliases": ["P8", "总监", "高管", "管理层"]},
+    {"canonical": "职场人", "aliases": ["在职", "社招", "跳槽"]}
+  ],
+  "industries": [
+    {"canonical": "互联网", "aliases": ["大厂", "平台", "互联网平台"]},
+    {"canonical": "人工智能", "aliases": ["AI", "AIGC", "大模型"]},
+    {"canonical": "金融", "aliases": ["银行", "证券", "基金", "投行", "保险"]},
+    {"canonical": "咨询", "aliases": ["咨询服务", "专业服务"]},
+    {"canonical": "教育", "aliases": ["培训", "教培"]},
+    {"canonical": "新能源汽车", "aliases": ["新能源车", "汽车", "智能汽车"]},
+    {"canonical": "医药", "aliases": ["生物医药", "医疗", "制药"]},
+    {"canonical": "快消", "aliases": ["消费品", "FMCG"]},
+    {"canonical": "制造业", "aliases": ["制造", "工业"]},
+    {"canonical": "房地产", "aliases": ["地产", "商业地产"]}
+  ]
+}

@@ -182,6 +182,7 @@ def test_dry_run_does_not_call_http_or_write_outputs(tmp_path: Path) -> None:
             output_dir=output,
             dry_run=True,
             limit=1,
+            mode="full",
         ),
         session=session,
         printer=lambda message: None,
@@ -216,6 +217,7 @@ def test_limit_offset_success_checkpoint_final_jsonl_and_review_excel(
             offset=1,
             limit=2,
             max_retries=0,
+            mode="full",
         ),
         session=session,
         printer=lambda message: None,
@@ -255,6 +257,7 @@ def test_failure_is_written_and_does_not_stop_later_records(tmp_path: Path) -> N
             output_dir=output,
             max_retries=0,
             no_excel=True,
+            mode="full",
         ),
         session=session,
         printer=lambda message: None,
@@ -285,6 +288,7 @@ def test_retriable_failure_can_succeed_on_next_attempt(tmp_path: Path) -> None:
             max_retries=1,
             retry_sleep=0.25,
             no_excel=True,
+            mode="full",
         ),
         session=session,
         sleep_fn=sleeps.append,
@@ -303,7 +307,7 @@ def test_resume_skips_matching_success(tmp_path: Path) -> None:
     _write_source(source, [_mentor_row(1)])
 
     run_batch(
-        BatchConfig(input_path=source, output_dir=output, max_retries=0),
+        BatchConfig(input_path=source, output_dir=output, max_retries=0, mode="full"),
         session=FakeSession(),
         printer=lambda message: None,
     )
@@ -315,6 +319,7 @@ def test_resume_skips_matching_success(tmp_path: Path) -> None:
             output_dir=output,
             resume=True,
             max_retries=0,
+            mode="full",
         ),
         session=resume_session,
         printer=lambda message: None,
@@ -330,7 +335,7 @@ def test_changed_record_hash_is_not_skipped_by_resume(tmp_path: Path) -> None:
     output = tmp_path / "outputs"
     _write_source(source, [_mentor_row(1, city="杭州")])
     run_batch(
-        BatchConfig(input_path=source, output_dir=output, max_retries=0),
+        BatchConfig(input_path=source, output_dir=output, max_retries=0, mode="full"),
         session=FakeSession(),
         printer=lambda message: None,
     )
@@ -344,6 +349,7 @@ def test_changed_record_hash_is_not_skipped_by_resume(tmp_path: Path) -> None:
             output_dir=output,
             resume=True,
             max_retries=0,
+            mode="full",
         ),
         session=changed_session,
         printer=lambda message: None,
@@ -363,7 +369,7 @@ def test_force_failure_does_not_reuse_old_success_for_current_hash(
     output = tmp_path / "outputs"
     _write_source(source, [_mentor_row(1)])
     run_batch(
-        BatchConfig(input_path=source, output_dir=output, max_retries=0),
+        BatchConfig(input_path=source, output_dir=output, max_retries=0, mode="full"),
         session=FakeSession(),
         printer=lambda message: None,
     )
@@ -375,6 +381,7 @@ def test_force_failure_does_not_reuse_old_success_for_current_hash(
             force=True,
             max_retries=0,
             no_excel=True,
+            mode="full",
         ),
         session=FakeSession([FakeResponse(status_code=500, payload={})]),
         printer=lambda message: None,
@@ -402,6 +409,7 @@ def test_corrupt_checkpoint_line_warns_and_continues(tmp_path: Path) -> None:
             resume=True,
             max_retries=0,
             no_excel=True,
+            mode="full",
         ),
         session=session,
         printer=messages.append,
@@ -409,7 +417,7 @@ def test_corrupt_checkpoint_line_warns_and_continues(tmp_path: Path) -> None:
 
     assert summary.success_count == 1
     assert len(session.calls) == 1
-    assert any("invalid checkpoint line 1" in message for message in messages)
+    assert any("invalid or mismatched full checkpoint line 1" in message for message in messages)
     assert all("broken checkpoint" not in message for message in messages)
 
 
@@ -451,6 +459,7 @@ def test_http_and_response_failures_are_classified(
             output_dir=output,
             max_retries=0,
             no_excel=True,
+            mode="full",
         ),
         session=FakeSession([response]),
         printer=lambda message: None,
@@ -477,6 +486,7 @@ def test_sensitive_request_error_is_not_written_or_printed(tmp_path: Path) -> No
             output_dir=output,
             max_retries=0,
             no_excel=True,
+            mode="full",
         ),
         session=session,
         printer=printed.append,

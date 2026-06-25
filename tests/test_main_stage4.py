@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,6 +14,7 @@ from agentrun.server import AgentRequest
 
 from mentor_agent.extractor import ExtractionError
 from mentor_agent.schemas import MentorInput, MentorResult
+from mentor_agent.simple_schemas import SimpleMentorBatchResult, SimpleMentorResult
 
 
 @dataclass
@@ -38,6 +40,7 @@ def stage4_main(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("MODEL_SERVICE_NAME", "stage4-test-service")
     monkeypatch.setenv("MODEL_NAME", "stage4-test-model")
+    monkeypatch.delenv("EXTRACTION_MODE", raising=False)
 
     import agentrun.integration.langchain as langchain_integration
 
@@ -95,9 +98,10 @@ def test_model_client_is_created_from_configured_service(stage4_main) -> None:
     assert factory_calls == [
         ("stage4-test-service", {"model": "stage4-test-model"})
     ]
+    assert module.EXTRACTION_MODE == "simple"
 
 
-def test_valid_mentor_input_returns_mentor_result_json(stage4_main) -> None:
+def test_valid_mentor_input_returns_simple_result_json_by_default(stage4_main) -> None:
     module, fake_model, _ = stage4_main
     request = _request(
         _mentor_input().model_dump_json(by_alias=True),
@@ -105,13 +109,112 @@ def test_valid_mentor_input_returns_mentor_result_json(stage4_main) -> None:
     )
 
     content = module.invoke_agent(request)
-    result = MentorResult.model_validate_json(content)
+    result = SimpleMentorResult.model_validate_json(content)
 
     assert result.mentor_id == "service_mentor:stage4-test"
     assert result.source.file == "synthetic-stage4.xlsx"
     assert result.processing.model_service_name == "stage4-test-service"
     assert result.processing.model_name == "stage4-test-model"
     assert len(fake_model.calls) == 1
+    assert result.schema_version == "simple-v1"
+
+
+def test_full_mode_returns_mentor_result_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_model = FakeChatModel()
+
+    def fake_model_factory(name: str, **kwargs: Any) -> FakeChatModel:
+        return fake_model
+
+    monkeypatch.setenv("MODEL_SERVICE_NAME", "stage4-test-service")
+    monkeypatch.setenv("MODEL_NAME", "stage4-test-model")
+    monkeypatch.setenv("EXTRACTION_MODE", "full")
+
+    import agentrun.integration.langchain as langchain_integration
+
+    monkeypatch.setattr(langchain_integration, "model", fake_model_factory)
+    sys.modules.pop("main", None)
+    module = importlib.import_module("main")
+    try:
+        content = module.invoke_agent(
+            _request(_mentor_input().model_dump_json(by_alias=True))
+        )
+        result = MentorResult.model_validate_json(content)
+    finally:
+        sys.modules.pop("main", None)
+
+    assert module.EXTRACTION_MODE == "full"
+    assert result.mentor_id == "service_mentor:stage4-test"
+
+
+def test_simple_mode_accepts_batch_request(stage4_main) -> None:
+    module, fake_model, _ = stage4_main
+    mentor_input = _mentor_input()
+    payload = {
+        "task": "extract_mentor_keywords_batch_simple",
+        "records": [
+            mentor_input.model_dump(by_alias=True, mode="json"),
+            mentor_input.model_copy(
+                update={
+                    "mentor_id": "service_mentor:stage4-test-2",
+                    "record_hash": "c" * 64,
+                }
+            ).model_dump(by_alias=True, mode="json"),
+        ],
+    }
+    fake_model.response = {
+        "results": [
+            {
+                "mentor_id": "service_mentor:stage4-test",
+                "extraction": {"skills": ["skill-a"]},
+            },
+            {
+                "mentor_id": "service_mentor:stage4-test-2",
+                "extraction": {"skills": ["skill-b"]},
+            },
+        ]
+    }
+
+    content = module.invoke_agent(
+        _request(json.dumps(payload, ensure_ascii=False))
+    )
+    result = SimpleMentorBatchResult.model_validate_json(content)
+
+    assert result.schema_version == "simple-batch-v1"
+    assert [item.mentor_id for item in result.results] == [
+        "service_mentor:stage4-test",
+        "service_mentor:stage4-test-2",
+    ]
+    assert len(fake_model.calls) == 1
+
+
+def test_full_mode_rejects_batch_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_model = FakeChatModel()
+
+    def fake_model_factory(name: str, **kwargs: Any) -> FakeChatModel:
+        return fake_model
+
+    monkeypatch.setenv("MODEL_SERVICE_NAME", "stage4-test-service")
+    monkeypatch.setenv("MODEL_NAME", "stage4-test-model")
+    monkeypatch.setenv("EXTRACTION_MODE", "full")
+
+    import agentrun.integration.langchain as langchain_integration
+
+    monkeypatch.setattr(langchain_integration, "model", fake_model_factory)
+    sys.modules.pop("main", None)
+    module = importlib.import_module("main")
+    try:
+        payload = {
+            "task": "extract_mentor_keywords_batch_simple",
+            "records": [_mentor_input().model_dump(by_alias=True, mode="json")],
+        }
+        with pytest.raises(module.Stage4RequestError, match="simple batch"):
+            module.invoke_agent(_request(json.dumps(payload, ensure_ascii=False)))
+    finally:
+        sys.modules.pop("main", None)
+
+    assert fake_model.calls == []
 
 
 def test_missing_user_message_returns_explicit_error(stage4_main) -> None:
@@ -170,7 +273,7 @@ def test_extraction_error_does_not_leak_sensitive_details(
             "Authorization: Bearer secret-token; API Key=secret; .env content"
         )
 
-    monkeypatch.setattr(module, "extract_single_mentor", fail_extraction)
+    monkeypatch.setattr(module, "extract_simple_mentor", fail_extraction)
     monkeypatch.setattr(
         module.logger,
         "error",
@@ -200,7 +303,7 @@ def test_unexpected_model_error_is_sanitized(
     def fail_model(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("AccessKey=secret-access-key")
 
-    monkeypatch.setattr(module, "extract_single_mentor", fail_model)
+    monkeypatch.setattr(module, "extract_simple_mentor", fail_model)
     monkeypatch.setattr(
         module.logger,
         "error",
