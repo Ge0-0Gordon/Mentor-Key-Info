@@ -109,17 +109,31 @@ class MentorDisplayCard(MatchStrictModel):
 
 class MatchDebugInfo(MatchStrictModel):
     final_score: float = Field(ge=0, le=100)
+    rule_rank: int | None = Field(default=None, ge=1)
+    llm_rank: int | None = Field(default=None, ge=1)
+    llm_fit_score: float | None = Field(default=None, ge=0, le=100)
     score_breakdown: RuleScoreBreakdown = Field(default_factory=RuleScoreBreakdown)
     matched_signals: MatchedSignals = Field(default_factory=MatchedSignals)
     possible_gap: str | None = None
     profile_parse_result: StudentProfile
     scoring_version: str = "matching-v1"
+    rerank_note: str | None = None
     recommendation_reason: list[str] = Field(default_factory=list)
 
 
 class MatchItem(MatchStrictModel):
     display: MentorDisplayCard
     debug: MatchDebugInfo
+
+
+class MatchRerankMetadata(MatchStrictModel):
+    enabled: bool = False
+    method: Literal["none", "llm"] = "none"
+    candidate_k: int = 0
+    success: bool = False
+    fallback_used: bool = False
+    latency_ms: int | None = None
+    error_message: str | None = None
 
 
 class Recommendation(MatchStrictModel):
@@ -144,6 +158,7 @@ class MatchResult(MatchStrictModel):
     returned_count: int
     used_rerank: bool = False
     scoring_version: str = "matching-v1"
+    rerank: MatchRerankMetadata = Field(default_factory=MatchRerankMetadata)
     results: list[MatchItem] = Field(default_factory=list)
     recommendations: list[Recommendation] = Field(default_factory=list)
 
@@ -167,6 +182,19 @@ class RerankResponse(MatchStrictModel):
     recommendations: list[RerankRecommendation] = Field(default_factory=list)
 
 
+class LlmRerankItem(MatchStrictModel):
+    mentor_id: str
+    rank: int = Field(ge=1)
+    llm_fit_score: float | None = Field(default=None, ge=0, le=100)
+    rerank_note: str | None = None
+
+
+class LlmRerankResponse(MatchStrictModel):
+    ordered_mentor_ids: list[str] = Field(default_factory=list)
+    scores: list[float] = Field(default_factory=list)
+    reranked_results: list[LlmRerankItem] = Field(default_factory=list)
+
+
 __all__ = [
     "ClarificationResult",
     "MatchedSignal",
@@ -174,11 +202,14 @@ __all__ = [
     "MatchResult",
     "MatchDebugInfo",
     "MatchItem",
+    "MatchRerankMetadata",
     "MentorDisplayCard",
     "MentorCandidateCard",
     "Recommendation",
     "RerankRecommendation",
     "RerankResponse",
+    "LlmRerankItem",
+    "LlmRerankResponse",
     "RuleScoreBreakdown",
     "StudentConstraints",
     "StudentProfile",

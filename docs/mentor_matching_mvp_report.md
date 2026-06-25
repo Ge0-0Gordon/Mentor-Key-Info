@@ -219,3 +219,41 @@ python match_mentors.py `
 2. 若规则 top-k 解释足够稳定，先接入后端 API。
 3. 对模糊 query 先返回推荐 + 追问，而不是阻塞等待 LLM。
 4. 后续再加可选 LLM rerank，只对 Top 10 candidate cards 调用，并做超时降级。
+## 2026-06-25 Compact LLM rerank update
+
+LLM rerank remains optional and is not on the default customer-facing path.
+The online test showed that the previous Top 10 rerank request could still
+timeout at 30 seconds, so the rerank payload was compacted:
+
+- Default `--rerank-candidate-k` changed from 30 to 10.
+- The rerank prompt now sends compact student intent instead of the full
+  `StudentProfile` object.
+- Each candidate is sent as a short one-line card with `mentor_id`,
+  `rule_rank`, `rule_score`, `name`, compact `card`, and compact `matched`
+  signals.
+- The compact payload is serialized with ASCII-safe Unicode escapes to avoid
+  model/provider paths that misread raw Chinese text as question marks.
+- The preferred LLM response is now compact JSON:
+  `{"ordered_mentor_ids":["service_mentor:1"],"scores":[90]}`.
+- The older `reranked_results` response is still accepted for compatibility.
+- Rerank still falls back to rule ranking on timeout, invalid JSON, unknown IDs,
+  duplicate IDs, or too few results.
+
+Measured prompt size on the current 121-mentor simple result file:
+
+| candidates sent | before chars | after chars |
+| ---: | ---: | ---: |
+| 5 | ~4,938 | ~2,705 |
+| 10 | ~9,068 | ~4,618 |
+| 30 | ~24,957 | ~12,468 |
+
+Even after compaction, realtime customer queries should keep `--rerank none`
+unless a faster model/configuration is confirmed. If LLM rerank is tested again,
+start with `--rerank-candidate-k 5` or `10`, keep a strict timeout, and treat
+fallback as normal behavior.
+
+One online smoke test with `--rerank-candidate-k 5 --rerank-timeout 60`
+succeeded without fallback, but the model-side rerank latency was still about
+26.5 seconds and did not change the top three ordering. This confirms that the
+compact payload helps correctness/fallback behavior, but the current model path
+is still too slow for default realtime customer search.
