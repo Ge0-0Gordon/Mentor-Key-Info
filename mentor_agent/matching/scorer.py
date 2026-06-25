@@ -153,6 +153,25 @@ def _set_signal_field(matched: MatchedSignals, field: str, signals: list[Matched
     setattr(matched, field, signals)
 
 
+def _merge_signals(*groups: list[MatchedSignal]) -> list[MatchedSignal]:
+    seen = set()
+    merged = []
+    for group in groups:
+        for signal in group:
+            key = (signal.query_term, signal.matched_term, signal.source_field, signal.match_type)
+            if key not in seen:
+                seen.add(key)
+                merged.append(signal)
+    return merged
+
+
+def _weighted_category_total(scores: dict[str, float], active_weights: dict[str, float]) -> float:
+    if not active_weights:
+        return 0.0
+    weighted_total = sum(scores[name] * weight for name, weight in active_weights.items())
+    return weighted_total / sum(active_weights.values())
+
+
 def _reason_from_signal(label: str, signals: list[MatchedSignal]) -> str | None:
     if not signals:
         return None
@@ -211,7 +230,7 @@ def score_mentor(
             category="companies",
             signal_field="companies",
             query_terms=profile.target_companies,
-            structured_terms=[*extraction.companies, *extraction.keywords],
+            structured_terms=extraction.companies,
             fallback_terms=fallback_terms,
             original_text=document.original_text,
         ),
@@ -219,7 +238,7 @@ def score_mentor(
             category="roles",
             signal_field="roles",
             query_terms=profile.target_roles,
-            structured_terms=[*extraction.roles, *extraction.keywords],
+            structured_terms=extraction.roles,
             fallback_terms=fallback_terms,
             original_text=document.original_text,
         ),
@@ -227,7 +246,7 @@ def score_mentor(
             category="skills",
             signal_field="skills",
             query_terms=profile.needed_help,
-            structured_terms=[*extraction.skills, *extraction.keywords],
+            structured_terms=extraction.skills,
             fallback_terms=fallback_terms,
             original_text=document.original_text,
         ),
@@ -264,21 +283,51 @@ def score_mentor(
     }
 
     scores: dict[str, float] = {}
+    structured_scores: dict[str, float] = {}
+    raw_text_scores: dict[str, float] = {}
     for score_name, config in category_configs.items():
-        score, signals = _score_category(config, aliases)
-        scores[score_name] = score
-        _set_signal_field(matched, config.signal_field, signals)
+        structured_config = FieldMatchConfig(
+            category=config.category,
+            signal_field=config.signal_field,
+            query_terms=config.query_terms,
+            structured_terms=config.structured_terms,
+            fallback_terms=[],
+            original_text="",
+        )
+        raw_text_config = FieldMatchConfig(
+            category=config.category,
+            signal_field=config.signal_field,
+            query_terms=config.query_terms,
+            structured_terms=[],
+            fallback_terms=config.fallback_terms,
+            original_text=config.original_text,
+        )
+        structured_score, structured_signals = _score_category(structured_config, aliases)
+        raw_text_score, raw_text_signals = _score_category(raw_text_config, aliases)
+        structured_scores[score_name] = structured_score
+        raw_text_scores[score_name] = raw_text_score
+        scores[score_name] = max(structured_score, raw_text_score)
+        _set_signal_field(matched, config.signal_field, _merge_signals(structured_signals, raw_text_signals))
 
     active_weights = {
         name: weight
         for name, weight in WEIGHTS.items()
         if category_configs[name].query_terms
     }
-    if active_weights:
-        total = sum(scores[name] * weight for name, weight in active_weights.items()) / sum(active_weights.values())
-    else:
-        total = scores["keyword_match"]
-    total = round(min(100.0, total), 2)
+    structured_total = _weighted_category_total(structured_scores, active_weights)
+    raw_text_total = _weighted_category_total(raw_text_scores, active_weights)
+    semantic_score = None
+    component_weights = {"structured": 0.50, "raw_text": 0.30}
+    if semantic_score is not None:
+        component_weights["semantic"] = 0.20
+    total_weight = sum(component_weights.values())
+    total = (
+        structured_total * component_weights["structured"]
+        + raw_text_total * component_weights["raw_text"]
+    )
+    if semantic_score is not None:
+        total += semantic_score * component_weights["semantic"]
+    total = round(min(100.0, total / total_weight), 2) if total_weight else 0.0
     breakdown = RuleScoreBreakdown(
         company_match=round(scores["company_match"], 2),
         role_match=round(scores["role_match"], 2),
@@ -286,12 +335,18 @@ def score_mentor(
         target_mentee_match=round(scores["target_mentee_match"], 2),
         industry_match=round(scores["industry_match"], 2),
         keyword_match=round(scores["keyword_match"], 2),
+        structured_score=round(structured_total, 2),
+        raw_text_score=round(raw_text_total, 2),
+        semantic_score=semantic_score,
+        final_score=total,
         total=total,
     )
     return MentorCandidateCard(
         mentor_id=result.mentor_id,
         name=result.original_fields.mentor_name,
+        gender=result.original_fields.gender,
         city=result.original_fields.city,
+        years_experience=result.original_fields.career_years,
         industries=extraction.industries,
         companies=extraction.companies,
         roles=extraction.roles,
@@ -304,6 +359,10 @@ def score_mentor(
         summary=extraction.summary,
         matched_signals=matched,
         rule_score=total,
+        structured_score=round(structured_total, 2),
+        raw_text_score=round(raw_text_total, 2),
+        semantic_score=semantic_score,
+        final_score=total,
         score_breakdown=breakdown,
     )
 
@@ -319,6 +378,8 @@ def rank_candidates(
     cards.sort(
         key=lambda card: (
             card.rule_score,
+            card.structured_score,
+            card.raw_text_score,
             len(card.matched_signals.companies),
             len(card.matched_signals.skills),
             len(card.matched_signals.target_mentees),

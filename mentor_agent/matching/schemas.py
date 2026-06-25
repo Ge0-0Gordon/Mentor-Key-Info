@@ -56,13 +56,19 @@ class RuleScoreBreakdown(MatchStrictModel):
     target_mentee_match: float = 0
     industry_match: float = 0
     keyword_match: float = 0
+    structured_score: float = 0
+    raw_text_score: float = 0
+    semantic_score: float | None = None
+    final_score: float = 0
     total: float = 0
 
 
 class MentorCandidateCard(MatchStrictModel):
     mentor_id: str
     name: str | None = None
+    gender: str | None = None
     city: str | None = None
+    years_experience: int | float | str | None = None
     industries: list[str] = Field(default_factory=list)
     companies: list[str] = Field(default_factory=list)
     roles: list[str] = Field(default_factory=list)
@@ -75,7 +81,45 @@ class MentorCandidateCard(MatchStrictModel):
     summary: str | None = None
     matched_signals: MatchedSignals = Field(default_factory=MatchedSignals)
     rule_score: float = Field(ge=0, le=100)
+    structured_score: float = Field(default=0, ge=0, le=100)
+    raw_text_score: float = Field(default=0, ge=0, le=100)
+    semantic_score: float | None = Field(default=None, ge=0, le=100)
+    final_score: float = Field(default=0, ge=0, le=100)
     score_breakdown: RuleScoreBreakdown = Field(default_factory=RuleScoreBreakdown)
+
+
+class MentorDisplayCard(MatchStrictModel):
+    rank: int = Field(ge=1)
+    mentor_id: str
+    name: str | None = None
+    gender: str | None = None
+    city: str | None = None
+    years_experience: int | float | str | None = None
+    industries: list[str] = Field(default_factory=list)
+    companies: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    credentials: list[str] = Field(default_factory=list)
+    education: list[str] = Field(default_factory=list)
+    target_mentees: list[str] = Field(default_factory=list)
+    highlights: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    summary: str | None = None
+
+
+class MatchDebugInfo(MatchStrictModel):
+    final_score: float = Field(ge=0, le=100)
+    score_breakdown: RuleScoreBreakdown = Field(default_factory=RuleScoreBreakdown)
+    matched_signals: MatchedSignals = Field(default_factory=MatchedSignals)
+    possible_gap: str | None = None
+    profile_parse_result: StudentProfile
+    scoring_version: str = "matching-v1"
+    recommendation_reason: list[str] = Field(default_factory=list)
+
+
+class MatchItem(MatchStrictModel):
+    display: MentorDisplayCard
+    debug: MatchDebugInfo
 
 
 class Recommendation(MatchStrictModel):
@@ -99,6 +143,8 @@ class MatchResult(MatchStrictModel):
     candidate_count: int
     returned_count: int
     used_rerank: bool = False
+    scoring_version: str = "matching-v1"
+    results: list[MatchItem] = Field(default_factory=list)
     recommendations: list[Recommendation] = Field(default_factory=list)
 
 
@@ -126,6 +172,9 @@ __all__ = [
     "MatchedSignal",
     "MatchedSignals",
     "MatchResult",
+    "MatchDebugInfo",
+    "MatchItem",
+    "MentorDisplayCard",
     "MentorCandidateCard",
     "Recommendation",
     "RerankRecommendation",

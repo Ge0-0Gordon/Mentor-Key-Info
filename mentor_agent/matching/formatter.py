@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from .schemas import MatchResult, MentorCandidateCard, Recommendation, StudentProfile
+from .schemas import (
+    MatchDebugInfo,
+    MatchItem,
+    MatchResult,
+    MentorCandidateCard,
+    MentorDisplayCard,
+    Recommendation,
+    StudentProfile,
+)
 from .scorer import build_reasons, possible_gap
 
 
@@ -15,8 +23,39 @@ def build_match_result(
     top_k: int,
     used_rerank: bool = False,
 ) -> MatchResult:
+    items = []
     recommendations = []
     for rank, card in enumerate(candidate_cards[:top_k], start=1):
+        display = MentorDisplayCard(
+            rank=rank,
+            mentor_id=card.mentor_id,
+            name=card.name,
+            gender=card.gender,
+            city=card.city,
+            years_experience=card.years_experience,
+            industries=card.industries,
+            companies=card.companies,
+            roles=card.roles,
+            skills=card.skills,
+            credentials=card.credentials,
+            education=card.education,
+            target_mentees=card.target_mentees,
+            highlights=card.highlights,
+            keywords=card.keywords,
+            summary=card.summary,
+        )
+        debug = MatchDebugInfo(
+            final_score=card.final_score,
+            score_breakdown=card.score_breakdown,
+            matched_signals=card.matched_signals,
+            possible_gap=possible_gap(card, profile),
+            profile_parse_result=profile,
+            recommendation_reason=build_reasons(card),
+        )
+        items.append(MatchItem(display=display, debug=debug))
+
+        # Backward-compatible internal field. Product output should read
+        # results[].display/debug instead of this legacy list.
         recommendations.append(
             Recommendation(
                 mentor_id=card.mentor_id,
@@ -24,7 +63,7 @@ def build_match_result(
                 city=card.city,
                 summary=card.summary,
                 rank=rank,
-                match_score=card.rule_score,
+                match_score=card.final_score,
                 rule_score=card.rule_score,
                 matched_signals=card.matched_signals,
                 recommendation_reason=build_reasons(card),
@@ -39,40 +78,51 @@ def build_match_result(
         candidate_count=len(candidate_cards),
         returned_count=len(recommendations),
         used_rerank=used_rerank,
+        results=items,
         recommendations=recommendations,
     )
 
 
-def _signal_summary(recommendation: Recommendation) -> str:
-    parts = []
-    signals = recommendation.matched_signals
-    for label, items in [
-        ("公司/机构", signals.companies),
-        ("岗位", signals.roles),
-        ("需求", signals.skills),
-        ("阶段", signals.target_mentees),
-        ("行业", signals.industries),
-    ]:
-        if items:
-            values = "、".join(dict.fromkeys((item.canonical or item.matched_term) for item in items[:3]))
-            parts.append(f"{label}:{values}")
-    return "; ".join(parts) or "-"
+def _join_values(values: list[str], limit: int = 4) -> str:
+    return "、".join(values[:limit]) if values else "-"
 
 
-def format_markdown(result: MatchResult) -> str:
+def format_markdown(result: MatchResult, *, show_score: bool = False) -> str:
+    score_columns = " | final_score" if show_score else ""
+    score_header = " | ---:" if show_score else ""
     lines = [
-        "| rank | mentor_id | 导师 | 城市 | score | matched_signals | reason | possible_gap |",
-        "| ---: | --- | --- | --- | ---: | --- | --- | --- |",
+        "| rank | mentor_id | 导师姓名 | 城市 | 职业年限 | 相关行业 | 相关公司/机构 | 岗位/身份 | 擅长方向 | 可辅导人群 | 简介"
+        + score_columns
+        + " |",
+        "| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---"
+        + score_header
+        + " |",
     ]
-    for rec in result.recommendations:
-        reason = "；".join(rec.recommendation_reason) or "-"
-        gap = rec.possible_gap or "-"
+    for item in result.results:
+        display = item.display
+        score_cell = f" | {item.debug.final_score:.1f}" if show_score else ""
         lines.append(
-            f"| {rec.rank} | {rec.mentor_id} | {rec.mentor_name or '-'} | {rec.city or '-'} | "
-            f"{rec.match_score:.1f} | "
-            f"{_signal_summary(rec)} | {reason} | {gap} |"
+            f"| {display.rank} | {display.mentor_id} | {display.name or '-'} | "
+            f"{display.city or '-'} | {display.years_experience or '-'} | "
+            f"{_join_values(display.industries)} | {_join_values(display.companies)} | "
+            f"{_join_values(display.roles)} | {_join_values(display.skills)} | "
+            f"{_join_values(display.target_mentees)} | {display.summary or '-'}"
+            f"{score_cell} |"
         )
     return "\n".join(lines)
 
 
-__all__ = ["build_match_result", "format_markdown"]
+def to_product_dict(result: MatchResult) -> dict:
+    return {
+        "student_profile": result.student_profile.model_dump(mode="json"),
+        "results": [
+            {
+                "display": item.display.model_dump(mode="json"),
+                "debug": item.debug.model_dump(mode="json"),
+            }
+            for item in result.results
+        ],
+    }
+
+
+__all__ = ["build_match_result", "format_markdown", "to_product_dict"]

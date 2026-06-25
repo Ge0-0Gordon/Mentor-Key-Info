@@ -1,6 +1,7 @@
 import json
 
-from match_mentors import run_match
+from match_mentors import parse_args, run_match
+from mentor_agent.matching.formatter import to_product_dict
 
 
 def test_run_match_returns_json_ready_result(tmp_path):
@@ -67,6 +68,36 @@ def test_run_match_returns_json_ready_result(tmp_path):
     )
 
     assert result.returned_count == 1
-    assert result.recommendations[0].mentor_id == "service_mentor:1"
+    assert result.results[0].display.mentor_id == "service_mentor:1"
+    assert result.results[0].display.name
+    assert result.results[0].display.city
+    assert result.results[0].display.years_experience == 8
+    assert result.results[0].display.industries
+    assert result.results[0].display.companies
+    assert result.results[0].display.roles
+    assert result.results[0].display.skills
+    assert result.results[0].display.target_mentees
+    assert result.results[0].display.summary
+    assert result.results[0].debug.final_score >= 0
+    assert result.results[0].debug.score_breakdown.final_score >= 0
+    assert result.results[0].debug.matched_signals
+    assert not hasattr(result.results[0].display, "possible_gap")
     assert "service_mentor:1" in markdown
-    assert "曾就职" not in result.model_dump_json(ensure_ascii=False)
+    assert "reason" not in markdown.lower()
+    product = to_product_dict(result)
+    assert set(product["results"][0]) == {"display", "debug"}
+    assert "recommendation_reason" not in product["results"][0]["display"]
+    assert "possible_gap" not in product["results"][0]["display"]
+    dumped = json.dumps(product, ensure_ascii=False)
+    for unsafe in ["曾就职", "任职过", "供职", "前员工", "老东家"]:
+        assert unsafe not in dumped
+
+
+def test_default_top_k_is_10(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["match_mentors.py", "--mentors", "dummy.jsonl", "--query", "query"],
+    )
+    args = parse_args()
+
+    assert args.top_k == 10

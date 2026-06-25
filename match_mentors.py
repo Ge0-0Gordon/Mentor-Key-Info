@@ -18,6 +18,7 @@ from mentor_agent.matching import (
     format_markdown,
     load_mentor_documents,
     rank_candidates,
+    to_product_dict,
 )
 from mentor_agent.matching.aliases import DEFAULT_ALIAS_PATH
 
@@ -26,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Match a student query to mentor simple results.")
     parser.add_argument("--mentors", required=True, type=Path, help="Path to simple mentor_results.jsonl.")
     parser.add_argument("--query", required=True, help="Student natural-language query.")
-    parser.add_argument("--top-k", type=int, default=5, help="Number of recommendations to return.")
+    parser.add_argument("--top-k", type=int, default=10, help="Number of mentor cards to return.")
     parser.add_argument(
         "--candidate-pool-size",
         type=int,
@@ -34,6 +35,7 @@ def parse_args() -> argparse.Namespace:
         help="Number of rule-ranked candidates to keep before final top-k.",
     )
     parser.add_argument("--aliases", type=Path, default=DEFAULT_ALIAS_PATH, help="Alias JSON path.")
+    parser.add_argument("--show-score", action="store_true", help="Show final_score in Markdown table.")
     parser.add_argument(
         "--format",
         choices=["json", "markdown", "both"],
@@ -47,7 +49,7 @@ def run_match(
     *,
     mentors_path: Path,
     query: str,
-    top_k: int = 5,
+    top_k: int = 10,
     candidate_pool_size: int = 30,
     aliases_path: Path = DEFAULT_ALIAS_PATH,
 ) -> tuple[object, str]:
@@ -81,11 +83,11 @@ def main() -> int:
     )
 
     if args.format in {"json", "both"}:
-        print(result.model_dump_json(by_alias=True, ensure_ascii=False, indent=2))
+        print(json.dumps(to_product_dict(result), ensure_ascii=False, indent=2))
     if args.format == "both":
         print()
     if args.format in {"markdown", "both"}:
-        print(markdown)
+        print(format_markdown(result, show_score=args.show_score))
     return 0
 
 

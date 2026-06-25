@@ -101,7 +101,10 @@ def test_score_uses_structured_fields_and_reasons_avoid_employer_claim(tmp_path)
 
     card = score_mentor(document, profile, aliases)
 
-    assert card.rule_score > 90
+    assert card.final_score > 70
+    assert card.score_breakdown.structured_score > 90
+    assert card.score_breakdown.raw_text_score >= 0
+    assert card.score_breakdown.semantic_score is None
     assert card.matched_signals.companies[0].canonical == "字节跳动"
     match_result = build_match_result(
         query=profile.raw_query,
