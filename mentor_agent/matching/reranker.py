@@ -223,14 +223,25 @@ def _compact_matched_signals(card: MentorCandidateCard) -> list[str]:
 def _candidate_payload(cards: list[MentorCandidateCard]) -> list[dict[str, Any]]:
     payload = []
     for idx, card in enumerate(cards, start=1):
+        tags = _compact_values(
+            [
+                *card.industries,
+                *card.roles,
+                *card.companies,
+                *card.skills,
+                *card.target_mentees,
+                *_compact_matched_signals(card),
+            ],
+            limit=8,
+            max_chars=18,
+        )
         payload.append(
             {
-                "mentor_id": card.mentor_id,
+                "id": card.mentor_id,
                 "rule_rank": idx,
-                "rule_score": card.final_score,
-                "name": card.name,
-                "card": _card_text(card),
-                "matched": _compact_matched_signals(card),
+                "score": card.final_score,
+                "tags": tags,
+                "summary": (card.summary or "")[:50],
             }
         )
     return payload
@@ -254,11 +265,10 @@ def build_rerank_messages(
         "Return compact JSON only, no Markdown, no explanation."
     )
     user = (
-        'Return exactly: {"ordered_mentor_ids":["service_mentor:1"],"scores":[90]}. '
-        "ordered_mentor_ids must contain top_k unique IDs from candidates, best first. "
-        "scores is optional and must be short. "
+        'Return exactly: {"ranked_ids":["service_mentor:1"]}. '
+        "ranked_ids must contain top_k unique IDs from candidates, best first. "
         "\n"
-        f"{json.dumps(payload, ensure_ascii=False)}"
+        f"{json.dumps(payload, ensure_ascii=True)}"
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -282,18 +292,18 @@ def _validate_llm_rerank_response(
         parsed = LlmRerankResponse.model_validate(payload)
     except ValidationError as exc:
         raise RerankValidationError(f"invalid rerank response: {exc.error_count()} validation error(s)") from exc
-    if parsed.ordered_mentor_ids:
+    ranked_ids = parsed.ranked_ids or parsed.ordered_mentor_ids
+    if ranked_ids:
         candidate_ids = {card.mentor_id for card in candidate_cards}
         seen_ids: set[str] = set()
         items: list[RerankedItem] = []
-        for rank, mentor_id in enumerate(parsed.ordered_mentor_ids, start=1):
+        for rank, mentor_id in enumerate(ranked_ids, start=1):
             if mentor_id not in candidate_ids:
                 raise RerankValidationError(f"rerank returned unknown mentor_id: {mentor_id}")
             if mentor_id in seen_ids:
                 raise RerankValidationError(f"rerank returned duplicate mentor_id: {mentor_id}")
             seen_ids.add(mentor_id)
-            score = parsed.scores[rank - 1] if rank <= len(parsed.scores) else None
-            items.append(RerankedItem(mentor_id=mentor_id, rank=rank, llm_fit_score=score))
+            items.append(RerankedItem(mentor_id=mentor_id, rank=rank))
         if len(items) < min(top_k, len(candidate_cards)):
             raise RerankValidationError("rerank response returned too few results")
         return items, False

@@ -15,6 +15,7 @@ class MentorDocument:
     result: SimpleMentorResult
     search_text: str
     original_text: str
+    mentor_search_text: str
 
 
 def _flatten(values: Any) -> list[str]:
@@ -30,10 +31,24 @@ def _original_values(result: SimpleMentorResult) -> list[str]:
     return [str(value) for value in payload.values() if value is not None]
 
 
+def _selected_original_values(result: SimpleMentorResult) -> list[str]:
+    original = result.original_fields
+    values = [
+        original.industry_tags,
+        original.coachable_levels,
+        original.career_history,
+        original.background_experience,
+    ]
+    return [str(value) for value in values if value is not None]
+
+
 def build_mentor_document(result: SimpleMentorResult) -> MentorDocument:
     extraction = result.extraction
     structured_parts = [
         result.mentor_id,
+        result.original_fields.mentor_name or "",
+        result.original_fields.city or "",
+        str(result.original_fields.career_years or ""),
         extraction.summary or "",
         *_flatten(extraction.industries),
         *_flatten(extraction.companies),
@@ -46,10 +61,13 @@ def build_mentor_document(result: SimpleMentorResult) -> MentorDocument:
         *_flatten(extraction.keywords),
     ]
     original_parts = _original_values(result)
+    semantic_original_parts = _selected_original_values(result)
+    mentor_search_text = " ".join([*structured_parts, *semantic_original_parts])
     return MentorDocument(
         result=result,
         search_text=" ".join([*structured_parts, *original_parts]),
         original_text=" ".join(original_parts),
+        mentor_search_text=mentor_search_text,
     )
 
 

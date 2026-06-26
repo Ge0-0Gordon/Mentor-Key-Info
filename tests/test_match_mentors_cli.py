@@ -1,6 +1,6 @@
 import json
 
-from match_mentors import parse_args, run_match
+from match_mentors import _profile_from_json, parse_args, run_match
 from mentor_agent.matching.formatter import to_product_dict
 
 
@@ -85,6 +85,11 @@ def test_run_match_returns_json_ready_result(tmp_path):
     assert "service_mentor:1" in markdown
     assert "reason" not in markdown.lower()
     product = to_product_dict(result)
+    assert len(product["all_mentors"]) == 1
+    assert product["all_mentors"][0]["display"]["is_recommended"] is True
+    assert product["recommendation"]["recommended_mentor_ids"] == ["service_mentor:1"]
+    assert product["recommendation"]["scoring_version"] == "recommendation-v1"
+    assert set(product["filters"]) == {"companies", "roles", "industries", "skills", "cities"}
     assert set(product["results"][0]) == {"display", "debug"}
     assert "recommendation_reason" not in product["results"][0]["display"]
     assert "possible_gap" not in product["results"][0]["display"]
@@ -101,3 +106,32 @@ def test_default_top_k_is_10(monkeypatch):
     args = parse_args()
 
     assert args.top_k == 10
+
+
+def test_student_profile_json_input(tmp_path):
+    profile_path = tmp_path / "student_profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "student_profile": {
+                    "work_years": 0,
+                    "target_roles": ["产品经理"],
+                    "target_companies": ["美团"],
+                    "target_industries": ["互联网"],
+                    "needed_help": ["模拟面试"],
+                    "current_stage": ["应届生"],
+                    "preferred_background": ["大厂"],
+                    "keywords": ["产品"],
+                    "constraints": {"city": None, "gender": None, "seniority": None},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    profile = _profile_from_json(profile_path)
+
+    assert profile.work_years == 0
+    assert profile.target_roles == ["产品经理"]
+    assert profile.raw_query

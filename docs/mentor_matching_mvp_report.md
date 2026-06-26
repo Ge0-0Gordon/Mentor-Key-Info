@@ -257,3 +257,66 @@ succeeded without fallback, but the model-side rerank latency was still about
 26.5 seconds and did not change the top three ordering. This confirms that the
 compact payload helps correctness/fallback behavior, but the current model path
 is still too slow for default realtime customer search.
+
+## 2026-06-25 Semantic score update
+
+The matching MVP now supports optional semantic scoring without introducing a
+database or vector store. The default remains local and deterministic:
+
+- `--semantic none` keeps the rule-only path and does not create embeddings.
+- `--semantic fake` uses deterministic local hash embeddings for offline tests
+  and experimentation.
+- `--semantic real` is reserved for a future real embedding provider and is not
+  configured in this stage.
+- Mentor embeddings are cached in
+  `outputs/matching_embeddings/mentor_embeddings.json` by
+  `mentor_id + record_hash + embedding_model`.
+- If a mentor record hash changes, the cache key changes and the embedding is
+  regenerated.
+
+Scoring uses active-weight normalization:
+
+- With semantic: `0.50 * structured_score + 0.30 * raw_text_score + 0.20 * semantic_score`.
+- Without semantic: structured/raw text weights are normalized over their active
+  weights, so semantic absence does not artificially lower scores.
+
+CLI examples:
+
+```powershell
+python match_mentors.py `
+  --mentors outputs/simple_full_run_20260625_123834/mentor_results.jsonl `
+  --query "我是留学生，想找互联网产品经理，目标字节美团，需要简历优化和模拟面试" `
+  --semantic fake `
+  --rerank none `
+  --top-k 10 `
+  --format both `
+  --show-score
+```
+
+Optional LLM rerank now stays off by default. If enabled, it runs after
+final-score sorting and sends compact Top 20 cards to the LLM:
+
+```powershell
+python match_mentors.py `
+  --mentors outputs/simple_full_run_20260625_123834/mentor_results.jsonl `
+  --query "..." `
+  --semantic fake `
+  --rerank llm `
+  --rerank-candidate-k 20 `
+  --rerank-timeout 8
+```
+
+The generated benchmark report is:
+
+- `outputs/matching_semantic_rerank_report.md`
+
+Observed on five test queries:
+
+- baseline rule path: about 0.4-0.7s/query
+- fake semantic path with cache: about 0.3-0.7s/query
+- fake semantic + LLM rerank Top20: timed out at 8s and fell back on all five
+  queries in this run
+
+Recommendation: enable semantic only after reviewing quality on real queries.
+Keep LLM rerank optional, not default, because fallback remains expected on the
+current model path.

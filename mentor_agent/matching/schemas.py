@@ -18,7 +18,8 @@ class StudentConstraints(MatchStrictModel):
 
 
 class StudentProfile(MatchStrictModel):
-    raw_query: str = Field(min_length=1)
+    raw_query: str = ""
+    work_years: int | None = Field(default=None, ge=0)
     target_industries: list[str] = Field(default_factory=list)
     target_companies: list[str] = Field(default_factory=list)
     target_roles: list[str] = Field(default_factory=list)
@@ -52,13 +53,22 @@ class MatchedSignals(MatchStrictModel):
 class RuleScoreBreakdown(MatchStrictModel):
     company_match: float = 0
     role_match: float = 0
+    skill_match: float = 0
     skill_or_help_match: float = 0
+    stage_match: float = 0
     target_mentee_match: float = 0
+    years_match: float = 0
+    background_match: float = 0
     industry_match: float = 0
     keyword_match: float = 0
+    raw_text_match: float = 0
+    semantic_match: float | None = None
     structured_score: float = 0
     raw_text_score: float = 0
     semantic_score: float | None = None
+    relevance_score: float = 0
+    availability_factor: float = 1.0
+    mentor_quality_factor: float = 1.0
     final_score: float = 0
     total: float = 0
 
@@ -90,6 +100,7 @@ class MentorCandidateCard(MatchStrictModel):
 
 class MentorDisplayCard(MatchStrictModel):
     rank: int = Field(ge=1)
+    is_recommended: bool = False
     mentor_id: str
     name: str | None = None
     gender: str | None = None
@@ -109,6 +120,7 @@ class MentorDisplayCard(MatchStrictModel):
 
 class MatchDebugInfo(MatchStrictModel):
     final_score: float = Field(ge=0, le=100)
+    relevance_score: float = Field(default=0, ge=0, le=100)
     rule_rank: int | None = Field(default=None, ge=1)
     llm_rank: int | None = Field(default=None, ge=1)
     llm_fit_score: float | None = Field(default=None, ge=0, le=100)
@@ -116,7 +128,7 @@ class MatchDebugInfo(MatchStrictModel):
     matched_signals: MatchedSignals = Field(default_factory=MatchedSignals)
     possible_gap: str | None = None
     profile_parse_result: StudentProfile
-    scoring_version: str = "matching-v1"
+    scoring_version: str = "recommendation-v1"
     rerank_note: str | None = None
     recommendation_reason: list[str] = Field(default_factory=list)
 
@@ -134,6 +146,15 @@ class MatchRerankMetadata(MatchStrictModel):
     fallback_used: bool = False
     latency_ms: int | None = None
     error_message: str | None = None
+
+
+class MatchSemanticMetadata(MatchStrictModel):
+    enabled: bool = False
+    method: Literal["none", "fake", "real"] = "none"
+    embedding_model: str | None = None
+    cache_path: str | None = None
+    cache_hit_count: int = 0
+    cache_miss_count: int = 0
 
 
 class Recommendation(MatchStrictModel):
@@ -157,7 +178,9 @@ class MatchResult(MatchStrictModel):
     candidate_count: int
     returned_count: int
     used_rerank: bool = False
-    scoring_version: str = "matching-v1"
+    top_k: int = 10
+    scoring_version: str = "recommendation-v1"
+    semantic: MatchSemanticMetadata = Field(default_factory=MatchSemanticMetadata)
     rerank: MatchRerankMetadata = Field(default_factory=MatchRerankMetadata)
     results: list[MatchItem] = Field(default_factory=list)
     recommendations: list[Recommendation] = Field(default_factory=list)
@@ -190,6 +213,7 @@ class LlmRerankItem(MatchStrictModel):
 
 
 class LlmRerankResponse(MatchStrictModel):
+    ranked_ids: list[str] = Field(default_factory=list)
     ordered_mentor_ids: list[str] = Field(default_factory=list)
     scores: list[float] = Field(default_factory=list)
     reranked_results: list[LlmRerankItem] = Field(default_factory=list)
@@ -203,6 +227,7 @@ __all__ = [
     "MatchDebugInfo",
     "MatchItem",
     "MatchRerankMetadata",
+    "MatchSemanticMetadata",
     "MentorDisplayCard",
     "MentorCandidateCard",
     "Recommendation",

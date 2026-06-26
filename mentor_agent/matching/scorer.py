@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .aliases import AliasIndex, normalize_text
+from .embeddings import EmbeddingCache, cosine_similarity, get_embedding
 from .mentor_index import MentorDocument
 from .schemas import (
     MatchedSignal,
@@ -17,13 +18,17 @@ from .schemas import (
 
 
 WEIGHTS = {
-    "company_match": 0.30,
+    "company_match": 0.25,
     "role_match": 0.20,
     "skill_or_help_match": 0.20,
-    "target_mentee_match": 0.15,
     "industry_match": 0.10,
-    "keyword_match": 0.05,
+    "target_mentee_match": 0.10,
+    "years_match": 0.05,
+    "semantic_match": 0.10,
 }
+
+MENTOR_QUALITY_FACTOR = 1.0
+AVAILABILITY_FACTOR = 1.0
 
 
 def _has_cjk(value: str) -> bool:
@@ -43,6 +48,14 @@ class FieldMatchConfig:
     structured_terms: list[str]
     fallback_terms: list[str]
     original_text: str
+
+
+@dataclass
+class SemanticContext:
+    method: str = "none"
+    embedding_model: str = "fake-hash-v1"
+    cache: EmbeddingCache | None = None
+    query_embedding: list[float] | None = None
 
 
 def _best_match_for_term(
@@ -172,6 +185,91 @@ def _weighted_category_total(scores: dict[str, float], active_weights: dict[str,
     return weighted_total / sum(active_weights.values())
 
 
+def build_student_search_text(profile: StudentProfile) -> str:
+    parts = [
+        profile.raw_query,
+        *profile.target_industries,
+        *profile.target_companies,
+        *profile.target_roles,
+        *profile.current_stage,
+        *profile.needed_help,
+        *profile.preferred_background,
+        *profile.keywords,
+    ]
+    return " ".join(str(part) for part in parts if part)
+
+
+def _semantic_score(document: MentorDocument, context: SemanticContext | None) -> float | None:
+    if not context or context.method == "none" or context.query_embedding is None:
+        return None
+    result = document.result
+    embedding = context.cache.get(result.mentor_id, result.record_hash, context.embedding_model) if context.cache else None
+    if embedding is None:
+        embedding = get_embedding(
+            document.mentor_search_text,
+            method=context.method,
+            embedding_model=context.embedding_model,
+        )
+        if context.cache:
+            context.cache.set(result.mentor_id, result.record_hash, context.embedding_model, embedding)
+    similarity = cosine_similarity(context.query_embedding, embedding)
+    return round(max(0.0, min(100.0, (similarity + 1.0) * 50.0)), 2)
+
+
+def _parse_years(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    digits = "".join(char for char in str(value) if char.isdigit() or char == ".")
+    if not digits:
+        return None
+    try:
+        return float(digits)
+    except ValueError:
+        return None
+
+
+def _years_match(student_work_years: int | None, mentor_years: object, document: MentorDocument) -> float:
+    if student_work_years is None:
+        return 0.0
+    years = _parse_years(mentor_years)
+    text = normalize_text(document.search_text)
+    senior_signal = any(term in text for term in ("管理", "负责人", "总监", "专家", "leader", "head"))
+    if student_work_years <= 1:
+        return 70.0
+    if student_work_years <= 5:
+        if years is None:
+            return 60.0
+        return 100.0 if years >= 5 else max(40.0, years / 5 * 100)
+    if years is None:
+        return 75.0 if senior_signal else 55.0
+    if years >= 8 or senior_signal:
+        return 100.0
+    return max(40.0, years / 8 * 100)
+
+
+def _weighted_relevance(scores: dict[str, float | None], active_terms: dict[str, bool]) -> float:
+    active: dict[str, float] = {}
+    for name, weight in WEIGHTS.items():
+        value = scores.get(name)
+        if value is None:
+            continue
+        if name == "semantic_match":
+            active[name] = weight
+        elif active_terms.get(name):
+            active[name] = weight
+    if not active:
+        return 0.0
+    total = sum(float(scores[name] or 0.0) * weight for name, weight in active.items())
+    return round(min(100.0, total / sum(active.values())), 2)
+
+
+def _final_score(relevance_score: float) -> float:
+    total = relevance_score * AVAILABILITY_FACTOR * MENTOR_QUALITY_FACTOR
+    return round(min(100.0, total), 2)
+
+
 def _reason_from_signal(label: str, signals: list[MatchedSignal]) -> str | None:
     if not signals:
         return None
@@ -214,6 +312,7 @@ def score_mentor(
     document: MentorDocument,
     profile: StudentProfile,
     aliases: AliasIndex,
+    semantic_context: SemanticContext | None = None,
 ) -> MentorCandidateCard:
     result = document.result
     extraction = result.extraction
@@ -280,6 +379,21 @@ def score_mentor(
             fallback_terms=fallback_terms,
             original_text=document.search_text,
         ),
+        "background_match": FieldMatchConfig(
+            category="skills",
+            signal_field="keywords",
+            query_terms=profile.preferred_background,
+            structured_terms=[
+                *extraction.keywords,
+                *extraction.skills,
+                *extraction.roles,
+                *extraction.companies,
+                *extraction.industries,
+                *(extraction.highlights or []),
+            ],
+            fallback_terms=fallback_terms,
+            original_text=document.search_text,
+        ),
     }
 
     scores: dict[str, float] = {}
@@ -309,35 +423,62 @@ def score_mentor(
         scores[score_name] = max(structured_score, raw_text_score)
         _set_signal_field(matched, config.signal_field, _merge_signals(structured_signals, raw_text_signals))
 
+    category_weights = {
+        "company_match": WEIGHTS["company_match"],
+        "role_match": WEIGHTS["role_match"],
+        "skill_or_help_match": WEIGHTS["skill_or_help_match"],
+        "target_mentee_match": WEIGHTS["target_mentee_match"],
+        "industry_match": WEIGHTS["industry_match"],
+        "keyword_match": 0.05,
+        "background_match": 0.05,
+    }
     active_weights = {
         name: weight
-        for name, weight in WEIGHTS.items()
+        for name, weight in category_weights.items()
         if category_configs[name].query_terms
     }
     structured_total = _weighted_category_total(structured_scores, active_weights)
     raw_text_total = _weighted_category_total(raw_text_scores, active_weights)
-    semantic_score = None
-    component_weights = {"structured": 0.50, "raw_text": 0.30}
-    if semantic_score is not None:
-        component_weights["semantic"] = 0.20
-    total_weight = sum(component_weights.values())
-    total = (
-        structured_total * component_weights["structured"]
-        + raw_text_total * component_weights["raw_text"]
-    )
-    if semantic_score is not None:
-        total += semantic_score * component_weights["semantic"]
-    total = round(min(100.0, total / total_weight), 2) if total_weight else 0.0
+    semantic_score = _semantic_score(document, semantic_context)
+    years_score = _years_match(profile.work_years, result.original_fields.career_years, document)
+    score_inputs: dict[str, float | None] = {
+        "company_match": scores["company_match"],
+        "role_match": scores["role_match"],
+        "skill_or_help_match": scores["skill_or_help_match"],
+        "industry_match": scores["industry_match"],
+        "target_mentee_match": scores["target_mentee_match"],
+        "years_match": years_score,
+        "semantic_match": semantic_score,
+    }
+    active_terms = {
+        "company_match": bool(profile.target_companies),
+        "role_match": bool(profile.target_roles),
+        "skill_or_help_match": bool(profile.needed_help),
+        "industry_match": bool(profile.target_industries),
+        "target_mentee_match": bool(profile.current_stage),
+        "years_match": profile.work_years is not None,
+    }
+    relevance_score = _weighted_relevance(score_inputs, active_terms)
+    total = _final_score(relevance_score)
     breakdown = RuleScoreBreakdown(
         company_match=round(scores["company_match"], 2),
         role_match=round(scores["role_match"], 2),
+        skill_match=round(scores["skill_or_help_match"], 2),
         skill_or_help_match=round(scores["skill_or_help_match"], 2),
+        stage_match=round(scores["target_mentee_match"], 2),
         target_mentee_match=round(scores["target_mentee_match"], 2),
+        years_match=round(years_score, 2),
+        background_match=round(scores["background_match"], 2),
         industry_match=round(scores["industry_match"], 2),
         keyword_match=round(scores["keyword_match"], 2),
+        raw_text_match=round(raw_text_total, 2),
+        semantic_match=semantic_score,
         structured_score=round(structured_total, 2),
         raw_text_score=round(raw_text_total, 2),
         semantic_score=semantic_score,
+        relevance_score=relevance_score,
+        availability_factor=AVAILABILITY_FACTOR,
+        mentor_quality_factor=MENTOR_QUALITY_FACTOR,
         final_score=total,
         total=total,
     )
@@ -373,8 +514,12 @@ def rank_candidates(
     aliases: AliasIndex,
     *,
     candidate_pool_size: int = 30,
+    semantic_context: SemanticContext | None = None,
 ) -> list[MentorCandidateCard]:
-    cards = [score_mentor(document, profile, aliases) for document in documents]
+    cards = [
+        score_mentor(document, profile, aliases, semantic_context=semantic_context)
+        for document in documents
+    ]
     cards.sort(
         key=lambda card: (
             card.rule_score,
@@ -391,7 +536,9 @@ def rank_candidates(
 
 __all__ = [
     "WEIGHTS",
+    "SemanticContext",
     "build_reasons",
+    "build_student_search_text",
     "possible_gap",
     "rank_candidates",
     "score_mentor",

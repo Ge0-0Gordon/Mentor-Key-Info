@@ -110,8 +110,7 @@ def test_llm_rerank_success_changes_order():
 def test_llm_rerank_accepts_compact_ordered_ids():
     model = FakeModel(
         {
-            "ordered_mentor_ids": ["service_mentor:3", "service_mentor:1", "service_mentor:2"],
-            "scores": [96, 90, 88],
+            "ranked_ids": ["service_mentor:3", "service_mentor:1", "service_mentor:2"],
         }
     )
     result = rerank_candidates_with_llm(StudentProfile(raw_query="query"), _cards(3), model, top_k=3)
@@ -119,21 +118,24 @@ def test_llm_rerank_accepts_compact_ordered_ids():
     assert result.success is True
     assert result.fallback_used is False
     assert result.reranked_ids[:3] == ["service_mentor:3", "service_mentor:1", "service_mentor:2"]
-    assert result.items[0].llm_fit_score == 96
 
 
 def test_build_rerank_messages_uses_compact_payload():
     messages = build_rerank_messages(StudentProfile(raw_query="query"), _cards(10), top_k=10)
     combined = "\n".join(message["content"] for message in messages)
 
-    assert "ordered_mentor_ids" in combined
+    assert "ranked_ids" in combined
     assert "candidate_mentors" not in combined
     assert '"display"' not in combined
+    assert "original_fields" not in combined
+    assert "score_breakdown" not in combined
     assert len(combined) < 4500
 
 
 def test_llm_rerank_invalid_outputs_fallback():
     cases = [
+        {"ranked_ids": ["service_mentor:404", "service_mentor:1"]},
+        {"ranked_ids": ["service_mentor:1", "service_mentor:1"]},
         {"reranked_results": [{"mentor_id": "service_mentor:404", "rank": 1}]},
         {"reranked_results": [{"mentor_id": "service_mentor:1", "rank": 1}, {"mentor_id": "service_mentor:1", "rank": 2}]},
         "not-json",
@@ -226,5 +228,6 @@ def test_parse_args_has_rerank_options(monkeypatch):
     args = parse_args()
 
     assert args.rerank == "none"
-    assert args.rerank_candidate_k == 10
+    assert args.rerank_candidate_k == 20
     assert args.rerank_timeout == 8
+    assert args.semantic == "none"
