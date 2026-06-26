@@ -29,9 +29,9 @@
 
 | 模型 | `.env MODEL_NAME` | 输出目录 | 状态 |
 |---|---|---|---|
-| DeepSeek V4 Pro | `deepseek-v4-pro` | `outputs/model_eval/deepseek-v4-pro` | 3/3 成功 |
-| Qwen 3.7 Plus | `qwen3.7-plus` | `outputs/model_eval/qwen3.7-plus` | 3/3 成功 |
-| DeepSeek V4 Flash | `deepseekv4-flash` | `outputs/model_eval/deepseekv4-flash` | 0/3，HTTP 400 |
+| DeepSeek V4 Pro | `deepseek-v4-pro` | `outputs/eval/model_eval/deepseek-v4-pro` | 3/3 成功 |
+| Qwen 3.7 Plus | `qwen3.7-plus` | `outputs/eval/model_eval/qwen3.7-plus` | 3/3 成功 |
+| DeepSeek V4 Flash | `deepseekv4-flash` | `outputs/eval/model_eval/deepseekv4-flash` | 0/3，HTTP 400 |
 
 三个目录及服务器日志均位于 `.gitignore` 已排除的 `outputs/` 下。
 

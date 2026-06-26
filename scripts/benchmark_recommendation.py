@@ -76,12 +76,12 @@ PROFILES = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark recommendation engine latency.")
-    parser.add_argument("--mentors", type=Path, default=Path("outputs/simple_full_run_20260625_123834/mentor_results.jsonl"))
+    parser.add_argument("--mentors", type=Path, default=Path("outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl"))
     parser.add_argument("--aliases", type=Path, default=DEFAULT_ALIAS_PATH)
     parser.add_argument("--runs", type=int, default=100)
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--semantic", choices=["none", "fake"], nargs="+", default=["none", "fake"])
-    parser.add_argument("--output", type=Path, default=Path("outputs/recommendation_benchmark_report.md"))
+    parser.add_argument("--output", type=Path, default=Path("outputs/reports/recommendation_benchmark_report.md"))
     return parser.parse_args()
 
 

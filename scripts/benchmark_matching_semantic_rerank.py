@@ -26,9 +26,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mentors",
         type=Path,
-        default=Path("outputs/simple_full_run_20260625_123834/mentor_results.jsonl"),
+        default=Path("outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl"),
     )
-    parser.add_argument("--output", type=Path, default=Path("outputs/matching_semantic_rerank_report.md"))
+    parser.add_argument("--output", type=Path, default=Path("outputs/reports/matching_semantic_rerank_report.md"))
     parser.add_argument("--skip-llm", action="store_true", help="Skip real LLM rerank benchmark.")
     return parser.parse_args()
 

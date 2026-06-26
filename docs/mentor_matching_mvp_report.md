@@ -90,7 +90,7 @@ final_score =
 ```powershell
 conda activate tutor
 python match_mentors.py `
-  --mentors outputs/simple_full_run/mentor_results.jsonl `
+  --mentors outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl `
   --query "我是留学生，想找互联网产品经理，目标字节美团，需要简历优化和模拟面试" `
   --top-k 10 `
   --format both
@@ -99,7 +99,7 @@ python match_mentors.py `
 Markdown 默认展示导师卡片字段，不展示长推荐理由、不展示 possible gap。若运营需要看分数，可加：
 
 ```powershell
-python match_mentors.py --mentors outputs/simple_full_run/mentor_results.jsonl --query "..." --show-score
+python match_mentors.py --mentors outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl --query "..." --show-score
 ```
 
 JSON 输出结构：
@@ -176,7 +176,7 @@ JSON 输出结构：
 ```powershell
 conda activate tutor
 python match_mentors.py `
-  --mentors outputs/simple_full_run_20260625_123834/mentor_results.jsonl `
+  --mentors outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl `
   --query "我是留学生，想找互联网产品经理，目标字节美团，需要简历优化和模拟面试" `
   --top-k 5 `
   --format both
@@ -284,7 +284,7 @@ CLI examples:
 
 ```powershell
 python match_mentors.py `
-  --mentors outputs/simple_full_run_20260625_123834/mentor_results.jsonl `
+  --mentors outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl `
   --query "我是留学生，想找互联网产品经理，目标字节美团，需要简历优化和模拟面试" `
   --semantic fake `
   --rerank none `
@@ -298,7 +298,7 @@ final-score sorting and sends compact Top 20 cards to the LLM:
 
 ```powershell
 python match_mentors.py `
-  --mentors outputs/simple_full_run_20260625_123834/mentor_results.jsonl `
+  --mentors outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl `
   --query "..." `
   --semantic fake `
   --rerank llm `
@@ -308,7 +308,7 @@ python match_mentors.py `
 
 The generated benchmark report is:
 
-- `outputs/matching_semantic_rerank_report.md`
+- `outputs/reports/matching_semantic_rerank_report.md`
 
 Observed on five test queries:
 

@@ -23,7 +23,7 @@ LLM rerank remains available as an optional offline/backend enhancement:
 
 ```powershell
 python match_mentors.py `
-  --mentors outputs/simple_full_run_20260625_123834/mentor_results.jsonl `
+  --mentors outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl `
   --query "..." `
   --semantic none `
   --rerank llm `
@@ -54,7 +54,7 @@ Two input modes are supported:
 
 ```powershell
 python match_mentors.py `
-  --mentors outputs/simple_full_run_20260625_123834/mentor_results.jsonl `
+  --mentors outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl `
   --query "我是留学生，想找互联网产品经理，目标字节美团，需要简历优化和模拟面试"
 ```
 
@@ -62,7 +62,7 @@ python match_mentors.py `
 
 ```powershell
 python match_mentors.py `
-  --mentors outputs/simple_full_run_20260625_123834/mentor_results.jsonl `
+  --mentors outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl `
   --student-profile-json inputs/student_profile.json `
   --top-k 10 `
   --semantic none `
@@ -202,7 +202,7 @@ python scripts/benchmark_recommendation.py
 Report:
 
 ```text
-outputs/recommendation_benchmark_report.md
+outputs/reports/recommendation_benchmark_report.md
 ```
 
 Observed on the current 121-mentor simple result file, 100 warm calls per mode:
