@@ -54,7 +54,33 @@ python scripts/evaluate_recommendation_quality.py `
   --semantic fake
 ```
 
-注意：CLI 只开放 `--semantic none/fake`。`real` 不在本评估脚本中默认启用，避免误接外部 embedding 服务。
+本地 sentence-transformers semantic 测试：
+
+```powershell
+python scripts/evaluate_recommendation_quality.py `
+  --mentors outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl `
+  --cases eval/student_profiles_eval.jsonl `
+  --gold-labels eval/gold/gold_labels_filled.jsonl `
+  --top-k 10 `
+  --semantic local `
+  --embedding-model BAAI/bge-m3 `
+  --embedding-cache outputs/matching_embeddings/mentor_embeddings_bge_m3.json `
+  --output-dir outputs/recommendation_eval_labeled_local_bge_m3
+```
+
+`semantic local` 使用 `sentence-transformers`，优先支持：
+
+- `BAAI/bge-m3`
+- `BAAI/bge-large-zh-v1.5`
+- `moka-ai/m3e-base`
+
+如果依赖未安装，脚本会给出清晰错误：
+
+```text
+semantic local requires sentence-transformers. Install it with: python -m pip install sentence-transformers
+```
+
+注意：`semantic real` 仍然需要外部 embedding provider 配置；没有 provider 时不会伪造结果。
 
 ## 输出文件
 
@@ -69,6 +95,53 @@ outputs/recommendation_eval_YYYYMMDD_HHMMSS/
 ```
 
 这些输出位于 `outputs/` 下，默认不提交 Git。
+
+## Embedding cache
+
+local semantic 的导师 embedding 使用本地 cache：
+
+```text
+outputs/matching_embeddings/mentor_embeddings_<model_safe_name>.json
+```
+
+例如：
+
+```text
+outputs/matching_embeddings/mentor_embeddings_baai_bge_m3.json
+```
+
+cache key 为：
+
+```text
+mentor_id + record_hash + embedding_model
+```
+
+学生 query/profile embedding 每次实时计算；导师 embedding 命中 cache 时不会重复计算。
+
+## none vs local 对比
+
+local semantic 跑完后，可以生成对比报告：
+
+```powershell
+python scripts/compare_recommendation_evals.py `
+  --none-dir outputs/recommendation_eval_labeled_none `
+  --real-dir outputs/recommendation_eval_labeled_local_bge_m3 `
+  --right-label "semantic local" `
+  --gold-labels eval/gold/gold_labels_filled.jsonl `
+  --output outputs/recommendation_eval_compare_none_vs_local.md
+```
+
+报告会包含：
+
+- avg latency
+- p95 latency
+- Hit@1 / Hit@3 / Hit@5 / Hit@10
+- MRR
+- NDCG@10
+- bad_in_top10_count
+- unknown_in_top10_count
+- avg semantic_match
+- Top10 changed count
 
 ## Weak evaluation 指标
 
@@ -90,6 +163,12 @@ outputs/recommendation_eval_YYYYMMDD_HHMMSS/
 - `latency_ms`
 
 `expected_signal_coverage` 会检查 Top10 的 display 字段、matched signals、keywords、summary 是否覆盖 case 中定义的期望信号。
+
+`expected_signals` 语义：
+
+- `must_match_any`：同一个 category 内命中任意一个 term 即认为该 category 覆盖。例如 `companies=["字节跳动", "美团"]`，Top10 中覆盖任意一个就算 company category covered。
+- `must_match_all`：同一个 category 内所有 term 都需要命中。只有未来确实需要“全部命中”时再使用。
+- `nice_to_have`：辅助观察覆盖比例，不代表硬性要求。
 
 重要：weak evaluation 只是辅助排查 alias、标签覆盖和打分问题，不代表真实推荐准确率。
 
@@ -145,6 +224,38 @@ good / acceptable / bad
 - bad 单独统计进入 Top10 的数量
 
 当前模板不含任何导师 ID，避免伪造金标准。
+
+## 从人工 review CSV 生成 gold labels
+
+业务方可以先打开：
+
+```text
+outputs/recommendation_eval_none/recommendation_quality_review.csv
+```
+
+在 `human_label` 中填写：
+
+```text
+good / acceptable / bad
+```
+
+然后运行：
+
+```powershell
+python scripts/build_gold_labels_from_review.py `
+  --review-csv outputs/recommendation_eval_none/recommendation_quality_review.csv `
+  --output eval/gold_labels_filled.jsonl
+```
+
+转换规则：
+
+- `human_label=good` → `good_mentor_ids`
+- `human_label=acceptable` → `acceptable_mentor_ids`
+- `human_label=bad` → `bad_mentor_ids`
+- 空 `human_label` 忽略
+- `human_notes` 会合并到 `notes`
+
+转换脚本不会编造 mentor_id，也不会输出完整 `original_fields`。
 
 ## 安全限制
 

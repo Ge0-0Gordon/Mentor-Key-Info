@@ -150,7 +150,7 @@ class MatchRerankMetadata(MatchStrictModel):
 
 class MatchSemanticMetadata(MatchStrictModel):
     enabled: bool = False
-    method: Literal["none", "fake", "real"] = "none"
+    method: Literal["none", "fake", "real", "local"] = "none"
     embedding_model: str | None = None
     cache_path: str | None = None
     cache_hit_count: int = 0

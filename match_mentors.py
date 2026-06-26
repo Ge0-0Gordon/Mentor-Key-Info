@@ -23,6 +23,7 @@ from mentor_agent.matching import (
     to_product_dict,
 )
 from mentor_agent.matching.aliases import DEFAULT_ALIAS_PATH
+from mentor_agent.matching.embeddings import default_local_embedding_cache_path
 from mentor_agent.matching.reranker import RerankResult, rerank_candidates_with_llm
 from mentor_agent.matching.schemas import StudentProfile
 
@@ -41,11 +42,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--aliases", type=Path, default=DEFAULT_ALIAS_PATH, help="Alias JSON path.")
     parser.add_argument("--show-score", action="store_true", help="Show final_score in Markdown table.")
-    parser.add_argument("--semantic", choices=["none", "fake", "real"], default="none", help="Optional semantic scoring method.")
+    parser.add_argument("--semantic", choices=["none", "fake", "real", "local"], default="none", help="Optional semantic scoring method.")
     parser.add_argument(
         "--embedding-cache",
         type=Path,
-        default=Path("outputs/matching_embeddings/mentor_embeddings.json"),
+        default=None,
         help="Local mentor embedding cache path.",
     )
     parser.add_argument("--embedding-model", default=None, help="Embedding model/cache name.")
@@ -140,7 +141,7 @@ def run_match(
     model_client: Any | None = None,
     rerank_report_path: Path | None = None,
     semantic: str = "none",
-    embedding_cache_path: Path | None = Path("outputs/matching_embeddings/mentor_embeddings.json"),
+    embedding_cache_path: Path | None = None,
     embedding_model: str | None = None,
 ) -> tuple[object, str]:
     aliases = AliasIndex.from_path(aliases_path)
@@ -160,7 +161,7 @@ def run_match(
         mentors_path,
         aliases_path,
         semantic_mode=semantic,
-        embedding_cache_path=embedding_cache_path,
+        embedding_cache_path=embedding_cache_path or (default_local_embedding_cache_path(embedding_model) if semantic == "local" else None),
         embedding_model=embedding_model,
     )
     artifacts = engine.rank(profile)

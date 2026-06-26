@@ -10,11 +10,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
+import requests
+
 
 FAKE_EMBEDDING_MODEL = "fake-hash-v1"
+DEFAULT_LOCAL_EMBEDDING_MODEL = "BAAI/bge-m3"
+DEFAULT_REAL_EMBEDDING_TIMEOUT = 30
+_LOCAL_MODELS: dict[str, object] = {}
 
 
 @dataclass
@@ -93,19 +99,109 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     return sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
 
 
+def safe_model_name(model_name: str | None) -> str:
+    text = str(model_name or DEFAULT_LOCAL_EMBEDDING_MODEL).strip()
+    safe = []
+    for char in text:
+        safe.append(char if char.isalnum() else "_")
+    return "_".join(part for part in "".join(safe).split("_") if part).lower()
+
+
+def default_local_embedding_cache_path(model_name: str | None) -> Path:
+    return Path("outputs") / "matching_embeddings" / f"mentor_embeddings_{safe_model_name(model_name)}.json"
+
+
+def local_embedding(text: str, *, embedding_model: str | None = None) -> list[float]:
+    model_name = embedding_model or DEFAULT_LOCAL_EMBEDDING_MODEL
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:
+        raise RuntimeError(
+            "semantic local requires sentence-transformers. "
+            "Install it with: python -m pip install sentence-transformers"
+        ) from exc
+
+    model = _LOCAL_MODELS.get(model_name)
+    if model is None:
+        try:
+            model = SentenceTransformer(model_name)
+        except Exception as exc:
+            raise RuntimeError(f"semantic local embedding model unavailable: {model_name}") from exc
+        _LOCAL_MODELS[model_name] = model
+
+    try:
+        vector = model.encode(text, normalize_embeddings=True)
+    except TypeError:
+        vector = model.encode(text)
+    except Exception as exc:
+        raise RuntimeError(f"semantic local embedding failed for model: {model_name}") from exc
+    if hasattr(vector, "tolist"):
+        vector = vector.tolist()
+    if vector and isinstance(vector[0], list):
+        vector = vector[0]
+    if not isinstance(vector, list) or not vector:
+        raise RuntimeError(f"semantic local embedding failed for model: {model_name}")
+    return [float(value) for value in vector]
+
+
+def _embedding_endpoint(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith("/embeddings"):
+        return base
+    return f"{base}/embeddings"
+
+
+def real_embedding(text: str, *, embedding_model: str | None = None) -> list[float]:
+    model = embedding_model or os.getenv("EMBEDDING_MODEL")
+    base_url = (
+        os.getenv("EMBEDDING_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or os.getenv("OPENAI_API_BASE")
+    )
+    if not model or not base_url:
+        raise RuntimeError("real embedding provider not available")
+    api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
+    timeout = float(os.getenv("EMBEDDING_TIMEOUT", str(DEFAULT_REAL_EMBEDDING_TIMEOUT)))
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        response = requests.post(
+            _embedding_endpoint(base_url),
+            headers=headers,
+            json={"model": model, "input": text},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        embedding = payload["data"][0]["embedding"]
+    except Exception as exc:
+        raise RuntimeError("real embedding provider not available") from exc
+    if not isinstance(embedding, list) or not embedding:
+        raise RuntimeError("real embedding provider not available")
+    return [float(value) for value in embedding]
+
+
 def get_embedding(text: str, *, method: str = "fake", embedding_model: str | None = None) -> list[float]:
     if method == "fake":
         return fake_hash_embedding(text)
+    if method == "local":
+        return local_embedding(text, embedding_model=embedding_model)
     if method == "real":
-        raise NotImplementedError("real embedding provider is not configured")
+        return real_embedding(text, embedding_model=embedding_model)
     raise ValueError(f"unsupported embedding method: {method}")
 
 
 __all__ = [
     "EmbeddingCache",
     "EmbeddingCacheStats",
+    "DEFAULT_LOCAL_EMBEDDING_MODEL",
     "FAKE_EMBEDDING_MODEL",
     "cosine_similarity",
+    "default_local_embedding_cache_path",
     "fake_hash_embedding",
     "get_embedding",
+    "local_embedding",
+    "real_embedding",
+    "safe_model_name",
 ]

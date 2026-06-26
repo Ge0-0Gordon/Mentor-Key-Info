@@ -1,8 +1,19 @@
 import json
+import sys
+import types
 
 from match_mentors import run_match
 from mentor_agent.matching import AliasIndex, RecommendationEngine, load_mentor_documents
-from mentor_agent.matching.embeddings import EmbeddingCache, cosine_similarity, fake_hash_embedding
+from mentor_agent.matching import embeddings
+from mentor_agent.matching.embeddings import (
+    DEFAULT_LOCAL_EMBEDDING_MODEL,
+    EmbeddingCache,
+    cosine_similarity,
+    default_local_embedding_cache_path,
+    fake_hash_embedding,
+    get_embedding,
+    safe_model_name,
+)
 from mentor_agent.matching.scorer import SemanticContext, build_student_search_text, rank_candidates
 from mentor_agent.matching.student_profile import extract_student_profile
 
@@ -93,6 +104,50 @@ def test_embedding_cache_hits_and_record_hash_miss(tmp_path):
     assert loaded.stats.miss_count == 1
 
 
+def test_local_embedding_missing_dependency_has_clear_error(monkeypatch):
+    original_import = __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "sentence_transformers":
+            raise ImportError("missing")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    try:
+        get_embedding("hello", method="local", embedding_model="BAAI/bge-m3")
+        raise AssertionError("semantic local should require sentence-transformers")
+    except RuntimeError as exc:
+        assert "semantic local requires sentence-transformers" in str(exc)
+
+
+def test_local_embedding_provider_initializes_and_safe_cache(monkeypatch):
+    embeddings._LOCAL_MODELS.clear()
+
+    class FakeModel:
+        def __init__(self, model_name):
+            self.model_name = model_name
+
+        def encode(self, text, normalize_embeddings=True):
+            assert normalize_embeddings is True
+            return [0.1, 0.2, 0.3]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=FakeModel),
+    )
+
+    vector = get_embedding("互联网 产品", method="local", embedding_model="BAAI/bge-m3")
+
+    assert vector == [0.1, 0.2, 0.3]
+    assert "BAAI/bge-m3" in embeddings._LOCAL_MODELS
+    assert safe_model_name("BAAI/bge-m3") == "baai_bge_m3"
+    assert default_local_embedding_cache_path("BAAI/bge-m3").as_posix().endswith(
+        "outputs/matching_embeddings/mentor_embeddings_baai_bge_m3.json"
+    )
+
+
 def test_semantic_score_enters_final_score_and_none_normalizes(tmp_path):
     aliases = AliasIndex.from_path(_write_aliases(tmp_path / "aliases.json"))
     result_path = _write_results(tmp_path / "mentor_results.jsonl", [_row()])
@@ -146,6 +201,43 @@ def test_run_match_semantic_fake_outputs_metadata_and_cache(tmp_path):
     )
     assert second.semantic.cache_hit_count == 2
     assert "semantic" not in markdown
+
+
+def test_run_match_semantic_local_uses_cache_and_metadata(tmp_path, monkeypatch):
+    embeddings._LOCAL_MODELS.clear()
+
+    class FakeModel:
+        def __init__(self, model_name):
+            self.model_name = model_name
+
+        def encode(self, text, normalize_embeddings=True):
+            return [float(len(str(text)) % 7), 1.0, 0.5]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=FakeModel),
+    )
+    aliases = _write_aliases(tmp_path / "aliases.json")
+    mentors = _write_results(tmp_path / "mentor_results.jsonl", [_row("service_mentor:1"), _row("service_mentor:2")])
+    cache_path = tmp_path / "mentor_embeddings_bge_m3.json"
+
+    result, _ = run_match(
+        mentors_path=mentors,
+        query="留学生 产品 简历",
+        top_k=2,
+        aliases_path=aliases,
+        semantic="local",
+        embedding_model="BAAI/bge-m3",
+        embedding_cache_path=cache_path,
+    )
+
+    assert result.semantic.enabled is True
+    assert result.semantic.method == "local"
+    assert result.semantic.embedding_model == "BAAI/bge-m3"
+    assert result.semantic.cache_miss_count == 2
+    assert result.results[0].debug.score_breakdown.semantic_match is not None
+    assert cache_path.exists()
 
 
 def test_recommendation_engine_returns_all_mentors_and_years_match(tmp_path):

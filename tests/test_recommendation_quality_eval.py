@@ -3,15 +3,20 @@ import json
 from pathlib import Path
 
 from mentor_agent.matching.evaluation import (
+    NEW_UNKNOWNS_COLUMNS,
     REVIEW_COLUMNS,
     expected_signal_coverage,
+    label_coverage_counts,
     load_eval_cases,
     load_gold_labels,
     run_quality_evaluation,
     supervised_metrics,
 )
+from mentor_agent.matching.embeddings import get_embedding
 from mentor_agent.matching.formatter import build_match_result
 from mentor_agent.matching.schemas import StudentProfile
+from scripts.build_gold_labels_from_review import build_gold_labels_from_review, write_gold_labels
+from scripts.evaluate_recommendation_quality import parse_args as parse_eval_args
 
 
 def _write_aliases(path: Path) -> Path:
@@ -195,10 +200,35 @@ def test_expected_signal_coverage_and_missing_signals():
         result.results,
     )
 
-    assert coverage["company_coverage"] == 0.5
+    assert coverage["company_coverage"] == 1.0
     assert coverage["role_coverage"] == 1.0
     assert coverage["skill_coverage"] == 1.0
-    assert coverage["missing_expected_signals"] == {"companies": ["阿里"]}
+    assert coverage["missing_expected_signals"] == {}
+
+
+def test_must_match_all_requires_every_term():
+    profile = StudentProfile(target_roles=["产品经理"], target_companies=["字节跳动"], needed_help=["简历优化"])
+    from mentor_agent.matching.schemas import MentorCandidateCard
+
+    card = MentorCandidateCard(
+        mentor_id="service_mentor:1",
+        companies=["字节跳动"],
+        roles=["产品经理"],
+        skills=["简历优化"],
+        target_mentees=["应届生"],
+        rule_score=90,
+        final_score=90,
+    )
+    result = build_match_result(query="", profile=profile, total_mentors=1, candidate_cards=[card], top_k=1)
+
+    coverage = expected_signal_coverage(
+        {"must_match_all": {"companies": ["字节跳动", "美团"], "roles": ["产品经理"]}},
+        result.results,
+    )
+
+    assert coverage["company_coverage"] == 0.0
+    assert coverage["role_coverage"] == 1.0
+    assert coverage["missing_expected_signals"] == {"companies": ["美团"]}
 
 
 def test_supervised_metrics_hit_mrr_ndcg():
@@ -227,6 +257,15 @@ def test_supervised_metrics_hit_mrr_ndcg():
     assert metrics["MRR"] == 0.5
     assert metrics["NDCG@10"] > 0
     assert metrics["bad_in_top10_count"] == 1
+
+    counts = label_coverage_counts(result, GoldLabel(case_id="case_001", good_mentor_ids={"m2"}, acceptable_mentor_ids={"m3"}, bad_mentor_ids={"m1"}))
+    assert counts == {
+        "labeled_in_top10_count": 3,
+        "unknown_in_top10_count": 0,
+        "good_in_top10_count": 1,
+        "acceptable_in_top10_count": 1,
+        "bad_in_top10_count": 1,
+    }
 
 
 def test_quality_evaluation_outputs_csv_jsonl_report_without_original_fields(tmp_path):
@@ -267,6 +306,7 @@ def test_quality_evaluation_outputs_csv_jsonl_report_without_original_fields(tmp
         "recommendation_quality_summary.csv",
         "recommendation_quality_details.jsonl",
         "recommendation_quality_review.csv",
+        "recommendation_quality_review_new_unknowns.csv",
     ]:
         assert (output_dir / filename).exists()
         text = (output_dir / filename).read_text(encoding="utf-8-sig" if filename.endswith(".csv") else "utf-8")
@@ -285,6 +325,13 @@ def test_quality_evaluation_outputs_csv_jsonl_report_without_original_fields(tmp
     detail = json.loads((output_dir / "recommendation_quality_details.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert detail["case_id"] == "case_001"
     assert "top_recommendations" in detail
+    with (output_dir / "recommendation_quality_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert "labeled_in_top10_count" in summary_rows[0]
+    assert "unknown_in_top10_count" in summary_rows[0]
+    with (output_dir / "recommendation_quality_review_new_unknowns.csv").open(encoding="utf-8-sig", newline="") as handle:
+        unknown_reader = csv.DictReader(handle)
+        assert unknown_reader.fieldnames == NEW_UNKNOWNS_COLUMNS
 
 
 def test_quality_evaluation_semantic_fake_runs(tmp_path):
@@ -299,3 +346,104 @@ def test_quality_evaluation_semantic_fake_runs(tmp_path):
 
     assert summary["case_count"] == 1
     assert (tmp_path / "eval_fake" / "mentor_embeddings.json").exists()
+
+
+def test_build_gold_labels_from_review_csv(tmp_path):
+    review_csv = tmp_path / "recommendation_quality_review.csv"
+    review_csv.write_text(
+        "\n".join(
+            [
+                "case_id,rank,mentor_id,name,human_label,human_notes",
+                "case_001,1,service_mentor:1,导师1,good,非常匹配",
+                "case_001,2,service_mentor:2,导师2,acceptable,方向接近",
+                "case_001,3,service_mentor:3,导师3,bad,不适合；不要写曾就职",
+                "case_001,4,service_mentor:4,导师4,,空标签忽略",
+                "case_002,1,service_mentor:5,导师5,GOOD,大小写归一",
+            ]
+        ),
+        encoding="utf-8-sig",
+    )
+    output = tmp_path / "gold_labels_filled.jsonl"
+
+    rows = build_gold_labels_from_review(review_csv)
+    write_gold_labels(rows, output)
+
+    assert rows == [
+        {
+            "case_id": "case_001",
+            "good_mentor_ids": ["service_mentor:1"],
+            "acceptable_mentor_ids": ["service_mentor:2"],
+            "bad_mentor_ids": ["service_mentor:3"],
+            "notes": "service_mentor:1: 非常匹配 | service_mentor:2: 方向接近 | service_mentor:3: 不适合；不要写[关系词已隐藏] | service_mentor:4: 空标签忽略",
+        },
+        {
+            "case_id": "case_002",
+            "good_mentor_ids": ["service_mentor:5"],
+            "acceptable_mentor_ids": [],
+            "bad_mentor_ids": [],
+            "notes": "service_mentor:5: 大小写归一",
+        },
+    ]
+    text = output.read_text(encoding="utf-8")
+    assert "original_fields" not in text
+    for unsafe in ["曾就职", "任职过", "供职", "前员工", "老东家"]:
+        assert unsafe not in text
+
+
+def test_real_embedding_provider_success_and_unavailable(monkeypatch):
+    monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_BASE", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+    try:
+        get_embedding("hello", method="real", embedding_model="embed-test")
+        raise AssertionError("real embedding should require a configured endpoint")
+    except RuntimeError as exc:
+        assert "real embedding provider not available" in str(exc)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"embedding": [0.1, 0.2, 0.3]}]}
+
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append((url, headers, json, timeout))
+        return FakeResponse()
+
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "http://127.0.0.1:9999/openai/v1")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "test-key")
+    monkeypatch.setattr("mentor_agent.matching.embeddings.requests.post", fake_post)
+
+    embedding = get_embedding("hello", method="real", embedding_model="embed-test")
+
+    assert embedding == [0.1, 0.2, 0.3]
+    assert calls[0][0] == "http://127.0.0.1:9999/openai/v1/embeddings"
+    assert calls[0][1]["Authorization"] == "Bearer test-key"
+    assert calls[0][2]["model"] == "embed-test"
+
+
+def test_evaluate_cli_parses_semantic_local(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate_recommendation_quality.py",
+            "--mentors",
+            "outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl",
+            "--semantic",
+            "local",
+            "--embedding-model",
+            "BAAI/bge-m3",
+            "--embedding-cache",
+            "outputs/matching_embeddings/mentor_embeddings_bge_m3.json",
+        ],
+    )
+
+    args = parse_eval_args()
+
+    assert args.semantic == "local"
+    assert args.embedding_model == "BAAI/bge-m3"
+    assert args.embedding_cache.as_posix().endswith("mentor_embeddings_bge_m3.json")

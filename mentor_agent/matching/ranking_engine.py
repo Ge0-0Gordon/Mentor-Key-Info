@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .aliases import AliasIndex
-from .embeddings import EmbeddingCache, FAKE_EMBEDDING_MODEL, get_embedding
+from .embeddings import (
+    DEFAULT_LOCAL_EMBEDDING_MODEL,
+    EmbeddingCache,
+    FAKE_EMBEDDING_MODEL,
+    default_local_embedding_cache_path,
+    get_embedding,
+)
 from .formatter import build_match_result
 from .mentor_index import MentorDocument, load_mentor_documents
 from .schemas import MatchResult, StudentProfile
@@ -29,14 +35,25 @@ class RecommendationEngine:
         documents: list[MentorDocument],
         aliases: AliasIndex,
         semantic_mode: str = "none",
-        embedding_cache_path: str | Path | None = Path("outputs/matching_embeddings/mentor_embeddings.json"),
+        embedding_cache_path: str | Path | None = None,
         embedding_model: str | None = None,
     ):
         self.documents = documents
         self.aliases = aliases
         self.semantic_mode = semantic_mode
-        self.embedding_cache_path = Path(embedding_cache_path) if embedding_cache_path else None
-        self.embedding_model = embedding_model or (FAKE_EMBEDDING_MODEL if semantic_mode == "fake" else None)
+        self.embedding_model = embedding_model or (
+            FAKE_EMBEDDING_MODEL
+            if semantic_mode == "fake"
+            else DEFAULT_LOCAL_EMBEDDING_MODEL
+            if semantic_mode == "local"
+            else None
+        )
+        if embedding_cache_path:
+            self.embedding_cache_path = Path(embedding_cache_path)
+        elif semantic_mode == "local":
+            self.embedding_cache_path = default_local_embedding_cache_path(self.embedding_model)
+        else:
+            self.embedding_cache_path = None
 
     @classmethod
     def from_jsonl(
@@ -45,7 +62,7 @@ class RecommendationEngine:
         aliases_path: str | Path,
         *,
         semantic_mode: str = "none",
-        embedding_cache_path: str | Path | None = Path("outputs/matching_embeddings/mentor_embeddings.json"),
+        embedding_cache_path: str | Path | None = None,
         embedding_model: str | None = None,
     ) -> "RecommendationEngine":
         return cls(

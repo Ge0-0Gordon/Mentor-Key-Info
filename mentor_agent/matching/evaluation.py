@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .aliases import normalize_text
+from .embeddings import default_local_embedding_cache_path
 from .ranking_engine import RecommendationEngine
 from .schemas import MatchItem, MatchResult, StudentProfile
 
@@ -45,6 +46,27 @@ REVIEW_COLUMNS = [
     "target_mentees",
     "summary",
     "auto_signal_hits",
+    "human_label",
+    "human_notes",
+]
+NEW_UNKNOWNS_COLUMNS = [
+    "case_id",
+    "rank",
+    "mentor_id",
+    "name",
+    "final_score",
+    "semantic_match",
+    "company_match",
+    "role_match",
+    "skill_match",
+    "industry_match",
+    "stage_match",
+    "industries",
+    "companies",
+    "roles",
+    "skills",
+    "target_mentees",
+    "summary",
     "human_label",
     "human_notes",
 ]
@@ -137,6 +159,22 @@ def _expected_terms(expected_signals: dict[str, Any]) -> dict[str, list[str]]:
     return buckets
 
 
+def _expected_terms_by_rule(expected_signals: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
+    rules: dict[str, dict[str, list[str]]] = {
+        "must_match_any": {},
+        "must_match_all": {},
+        "nice_to_have": {},
+    }
+    for rule_name in rules:
+        section = expected_signals.get(rule_name) or {}
+        if not isinstance(section, dict):
+            continue
+        for category, values in section.items():
+            if isinstance(values, list):
+                rules[rule_name][category] = [str(value) for value in values if value]
+    return rules
+
+
 def _signal_text(item: MatchItem) -> str:
     display = item.display
     debug = item.debug
@@ -173,7 +211,6 @@ def expected_signal_coverage(
     expected_signals: dict[str, Any],
     items: list[MatchItem],
 ) -> dict[str, Any]:
-    expected = _expected_terms(expected_signals)
     mapping = {
         "companies": "company_coverage",
         "roles": "role_coverage",
@@ -185,17 +222,50 @@ def expected_signal_coverage(
     result: dict[str, Any] = {}
     missing: dict[str, list[str]] = {}
     coverage_values: list[float] = []
-    for category, output_key in mapping.items():
-        terms = expected.get(category, [])
-        if not terms:
+    rules = _expected_terms_by_rule(expected_signals)
+    categories = sorted(
+        set().union(
+            rules["must_match_any"].keys(),
+            rules["must_match_all"].keys(),
+            rules["nice_to_have"].keys(),
+        )
+    )
+    for category in categories:
+        if category not in mapping:
+            continue
+        output_key = mapping[category]
+        category_scores: list[float] = []
+        category_missing: list[str] = []
+
+        any_terms = rules["must_match_any"].get(category, [])
+        if any_terms:
+            any_covered = any(_term_is_covered(term, items) for term in any_terms)
+            category_scores.append(1.0 if any_covered else 0.0)
+            if not any_covered:
+                category_missing.extend(any_terms)
+
+        all_terms = rules["must_match_all"].get(category, [])
+        if all_terms:
+            all_missing = [term for term in all_terms if not _term_is_covered(term, items)]
+            category_scores.append(1.0 if not all_missing else 0.0)
+            category_missing.extend(all_missing)
+
+        nice_terms = rules["nice_to_have"].get(category, [])
+        if nice_terms:
+            nice_missing = [term for term in nice_terms if not _term_is_covered(term, items)]
+            category_scores.append((len(nice_terms) - len(nice_missing)) / len(nice_terms))
+            category_missing.extend(nice_missing)
+
+        if not category_scores:
             result[output_key] = None
             continue
-        missing_terms = [term for term in terms if not _term_is_covered(term, items)]
-        coverage = (len(terms) - len(missing_terms)) / len(terms)
+        coverage = statistics.mean(category_scores)
         result[output_key] = round(coverage, 4)
         coverage_values.append(coverage)
-        if missing_terms:
-            missing[category] = missing_terms
+        if category_missing:
+            missing[category] = list(dict.fromkeys(category_missing))
+    for category, output_key in mapping.items():
+        result.setdefault(output_key, None)
     result["overall_coverage"] = round(statistics.mean(coverage_values), 4) if coverage_values else None
     result["missing_expected_signals"] = missing
     return result
@@ -283,6 +353,26 @@ def supervised_metrics(result: MatchResult, gold_label: GoldLabel | None) -> dic
     }
 
 
+def label_coverage_counts(result: MatchResult, gold_label: GoldLabel | None) -> dict[str, int]:
+    top_ids = [item.display.mentor_id for item in result.results[: result.top_k]]
+    if gold_label is None:
+        return {
+            "labeled_in_top10_count": 0,
+            "unknown_in_top10_count": len(top_ids),
+            "good_in_top10_count": 0,
+            "acceptable_in_top10_count": 0,
+            "bad_in_top10_count": 0,
+        }
+    labeled = gold_label.good_mentor_ids | gold_label.acceptable_mentor_ids | gold_label.bad_mentor_ids
+    return {
+        "labeled_in_top10_count": sum(1 for mentor_id in top_ids if mentor_id in labeled),
+        "unknown_in_top10_count": sum(1 for mentor_id in top_ids if mentor_id not in labeled),
+        "good_in_top10_count": sum(1 for mentor_id in top_ids if mentor_id in gold_label.good_mentor_ids),
+        "acceptable_in_top10_count": sum(1 for mentor_id in top_ids if mentor_id in gold_label.acceptable_mentor_ids),
+        "bad_in_top10_count": sum(1 for mentor_id in top_ids if mentor_id in gold_label.bad_mentor_ids),
+    }
+
+
 def _dcg(relevance: list[int]) -> float:
     return sum((2**rel - 1) / math.log2(idx + 2) for idx, rel in enumerate(relevance))
 
@@ -290,6 +380,28 @@ def _dcg(relevance: list[int]) -> float:
 def _ndcg(relevance: list[int], ideal_relevance: list[int]) -> float:
     ideal = _dcg(ideal_relevance)
     return _dcg(relevance) / ideal if ideal else 0.0
+
+
+def aggregate_supervised_metrics(
+    supervised_rows: list[dict[str, Any]],
+    summary_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    labeled_case_count = len(supervised_rows)
+    aggregate = {
+        "labeled_case_count": labeled_case_count,
+        "Hit@1": _mean([row["Hit@1"] for row in supervised_rows]),
+        "Hit@3": _mean([row["Hit@3"] for row in supervised_rows]),
+        "Hit@5": _mean([row["Hit@5"] for row in supervised_rows]),
+        "Hit@10": _mean([row["Hit@10"] for row in supervised_rows]),
+        "MRR": _mean([row["MRR"] for row in supervised_rows]),
+        "NDCG@10": _mean([row["NDCG@10"] for row in supervised_rows]),
+        "bad_in_top10_count": sum(int(row.get("bad_in_top10_count") or 0) for row in supervised_rows),
+        "labeled_in_top10_count": sum(int(row.get("labeled_in_top10_count") or 0) for row in summary_rows),
+        "unknown_in_top10_count": sum(int(row.get("unknown_in_top10_count") or 0) for row in summary_rows),
+        "good_in_top10_count": sum(int(row.get("good_in_top10_count") or 0) for row in summary_rows),
+        "acceptable_in_top10_count": sum(int(row.get("acceptable_in_top10_count") or 0) for row in summary_rows),
+    }
+    return aggregate
 
 
 def _join(values: list[str]) -> str:
@@ -337,6 +449,43 @@ def review_rows(case: EvalCase, result: MatchResult) -> list[dict[str, Any]]:
     return rows
 
 
+def new_unknown_review_rows(case: EvalCase, result: MatchResult, gold_label: GoldLabel | None) -> list[dict[str, Any]]:
+    if gold_label is None:
+        labeled: set[str] = set()
+    else:
+        labeled = gold_label.good_mentor_ids | gold_label.acceptable_mentor_ids | gold_label.bad_mentor_ids
+    rows: list[dict[str, Any]] = []
+    for item in result.results[: result.top_k]:
+        if item.display.mentor_id in labeled:
+            continue
+        display = item.display
+        breakdown = item.debug.score_breakdown
+        rows.append(
+            {
+                "case_id": case.case_id,
+                "rank": display.rank,
+                "mentor_id": display.mentor_id,
+                "name": display.name or "",
+                "final_score": item.debug.final_score,
+                "semantic_match": breakdown.semantic_match if breakdown.semantic_match is not None else "",
+                "company_match": breakdown.company_match,
+                "role_match": breakdown.role_match,
+                "skill_match": breakdown.skill_match,
+                "industry_match": breakdown.industry_match,
+                "stage_match": breakdown.stage_match,
+                "industries": _join(display.industries),
+                "companies": _join(display.companies),
+                "roles": _join(display.roles),
+                "skills": _join(display.skills),
+                "target_mentees": _join(display.target_mentees),
+                "summary": display.summary or "",
+                "human_label": "",
+                "human_notes": "",
+            }
+        )
+    return rows
+
+
 def detail_payload(case: EvalCase, result: MatchResult, metrics: dict[str, Any], supervised: dict[str, Any]) -> dict[str, Any]:
     return {
         "case_id": case.case_id,
@@ -379,6 +528,8 @@ def run_quality_evaluation(
     output_dir: str | Path,
     top_k: int = 10,
     semantic: str = "none",
+    embedding_model: str | None = None,
+    embedding_cache_path: str | Path | None = None,
     gold_labels_path: str | Path | None = None,
     show_debug: bool = False,
 ) -> dict[str, Any]:
@@ -390,35 +541,47 @@ def run_quality_evaluation(
         mentors_path,
         aliases_path,
         semantic_mode=semantic,
-        embedding_cache_path=output_path / "mentor_embeddings.json" if semantic != "none" else None,
+        embedding_cache_path=embedding_cache_path
+        or (default_local_embedding_cache_path(embedding_model) if semantic == "local" else output_path / "mentor_embeddings.json" if semantic != "none" else None),
+        embedding_model=embedding_model,
     )
 
     summary_rows: list[dict[str, Any]] = []
     all_review_rows: list[dict[str, Any]] = []
     details: list[dict[str, Any]] = []
     supervised_rows: list[dict[str, Any]] = []
+    new_unknown_rows: list[dict[str, Any]] = []
 
     for case in cases:
         started = time.perf_counter()
         result = engine.recommend(case.student_profile, top_k=top_k)
         latency_ms = int((time.perf_counter() - started) * 1000)
         metrics = weak_case_metrics(case, result, latency_ms)
-        supervised = supervised_metrics(result, gold_labels.get(case.case_id))
+        gold_label = gold_labels.get(case.case_id)
+        supervised = supervised_metrics(result, gold_label)
+        label_counts = label_coverage_counts(result, gold_label)
         summary_row = {
             **{key: value for key, value in metrics.items() if key not in {"coverage", "missing_expected_signals"}},
             "top10_expected_signal_coverage": metrics["top10_expected_signal_coverage"],
             "missing_expected_signals_json": json.dumps(metrics["missing_expected_signals"], ensure_ascii=False),
+            **label_counts,
             "notes": " | ".join(diagnose_case(metrics)),
         }
         summary_rows.append(summary_row)
         if supervised:
             supervised_rows.append({"case_id": case.case_id, **supervised})
         all_review_rows.extend(review_rows(case, result))
+        new_unknown_rows.extend(new_unknown_review_rows(case, result, gold_label))
         details.append(detail_payload(case, result, metrics, supervised))
 
     sanitized_details = [_sanitize_for_output(detail) for detail in details]
     _write_csv(output_path / "recommendation_quality_summary.csv", summary_rows)
     _write_csv(output_path / "recommendation_quality_review.csv", all_review_rows, fieldnames=REVIEW_COLUMNS)
+    _write_csv(
+        output_path / "recommendation_quality_review_new_unknowns.csv",
+        new_unknown_rows,
+        fieldnames=NEW_UNKNOWNS_COLUMNS,
+    )
     _write_jsonl(output_path / "recommendation_quality_details.jsonl", sanitized_details)
     report = render_markdown_report(
         mentors_path=Path(mentors_path),
@@ -428,11 +591,13 @@ def run_quality_evaluation(
         summary_rows=summary_rows,
         details=sanitized_details,
         supervised_rows=supervised_rows,
+        aggregate_supervised=aggregate_supervised_metrics(supervised_rows, summary_rows),
         show_debug=show_debug,
     )
     report_path = output_path / "recommendation_quality_report.md"
     _assert_safe_output(report)
     report_path.write_text(report, encoding="utf-8")
+    aggregate_supervised = aggregate_supervised_metrics(supervised_rows, summary_rows)
     return {
         "output_dir": str(output_path),
         "report_path": str(report_path),
@@ -452,6 +617,7 @@ def run_quality_evaluation(
             if row["top10_expected_signal_coverage"] is not None and row["top10_expected_signal_coverage"] < 0.5
         ],
         "zero_score_cases": [row["case_id"] for row in summary_rows if row["zero_score_count"] > 0],
+        **aggregate_supervised,
     }
 
 
@@ -500,6 +666,7 @@ def render_markdown_report(
     summary_rows: list[dict[str, Any]],
     details: list[dict[str, Any]],
     supervised_rows: list[dict[str, Any]],
+    aggregate_supervised: dict[str, Any] | None = None,
     show_debug: bool = False,
 ) -> str:
     avg_latency = _mean([row["latency_ms"] for row in summary_rows])
@@ -537,7 +704,34 @@ def render_markdown_report(
         "",
     ]
     if supervised_rows:
-        lines.extend(["## Supervised Metrics", "", "| case_id | Hit@1 | Hit@3 | Hit@5 | Hit@10 | MRR | NDCG@10 | bad_in_top10_count |", "|---|---:|---:|---:|---:|---:|---:|---:|"])
+        aggregate_supervised = aggregate_supervised or aggregate_supervised_metrics(supervised_rows, summary_rows)
+        lines.extend(
+            [
+                "## Supervised Metrics",
+                "",
+                "### Aggregate",
+                "",
+                "| metric | value |",
+                "|---|---:|",
+                f"| labeled_case_count | {aggregate_supervised['labeled_case_count']} |",
+                f"| Hit@1 | {aggregate_supervised['Hit@1']} |",
+                f"| Hit@3 | {aggregate_supervised['Hit@3']} |",
+                f"| Hit@5 | {aggregate_supervised['Hit@5']} |",
+                f"| Hit@10 | {aggregate_supervised['Hit@10']} |",
+                f"| MRR | {aggregate_supervised['MRR']} |",
+                f"| NDCG@10 | {aggregate_supervised['NDCG@10']} |",
+                f"| bad_in_top10_count | {aggregate_supervised['bad_in_top10_count']} |",
+                f"| labeled_in_top10_count | {aggregate_supervised['labeled_in_top10_count']} |",
+                f"| unknown_in_top10_count | {aggregate_supervised['unknown_in_top10_count']} |",
+                f"| good_in_top10_count | {aggregate_supervised['good_in_top10_count']} |",
+                f"| acceptable_in_top10_count | {aggregate_supervised['acceptable_in_top10_count']} |",
+                "",
+                "### Per Case",
+                "",
+                "| case_id | Hit@1 | Hit@3 | Hit@5 | Hit@10 | MRR | NDCG@10 | bad_in_top10_count |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
         for row in supervised_rows:
             lines.append(
                 f"| {row['case_id']} | {row['Hit@1']} | {row['Hit@3']} | {row['Hit@5']} | "
@@ -644,11 +838,15 @@ def _assert_safe_output(text: str) -> None:
 __all__ = [
     "EvalCase",
     "GoldLabel",
+    "NEW_UNKNOWNS_COLUMNS",
     "REVIEW_COLUMNS",
+    "aggregate_supervised_metrics",
     "detail_payload",
     "expected_signal_coverage",
+    "label_coverage_counts",
     "load_eval_cases",
     "load_gold_labels",
+    "new_unknown_review_rows",
     "review_rows",
     "run_quality_evaluation",
     "supervised_metrics",
