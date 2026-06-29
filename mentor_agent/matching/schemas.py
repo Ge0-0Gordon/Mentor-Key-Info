@@ -6,6 +6,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from mentor_agent.simple_schemas import (
+    TaggedCompany,
+    TaggedIndustry,
+    TaggedPosition,
+)
+
 
 class MatchStrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -100,6 +106,10 @@ class MentorCandidateCard(MatchStrictModel):
     target_mentees: list[str] = Field(default_factory=list)
     highlights: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
+    industry_tags: list[TaggedIndustry] = Field(default_factory=list)
+    position_tags: list[TaggedPosition] = Field(default_factory=list)
+    company_tags: list[TaggedCompany] = Field(default_factory=list)
+    raw_keywords: list[str] = Field(default_factory=list)
     summary: str | None = None
     matched_signals: MatchedSignals = Field(default_factory=MatchedSignals)
     rule_score: float = Field(ge=0, le=100)
@@ -127,6 +137,10 @@ class MentorDisplayCard(MatchStrictModel):
     target_mentees: list[str] = Field(default_factory=list)
     highlights: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
+    industry_tags: list[TaggedIndustry] = Field(default_factory=list)
+    position_tags: list[TaggedPosition] = Field(default_factory=list)
+    company_tags: list[TaggedCompany] = Field(default_factory=list)
+    raw_keywords: list[str] = Field(default_factory=list)
     summary: str | None = None
 
 
@@ -138,6 +152,10 @@ class MatchDebugInfo(MatchStrictModel):
     llm_fit_score: float | None = Field(default=None, ge=0, le=100)
     score_breakdown: RuleScoreBreakdown = Field(default_factory=RuleScoreBreakdown)
     matched_signals: MatchedSignals = Field(default_factory=MatchedSignals)
+    industry_tags: list[TaggedIndustry] = Field(default_factory=list)
+    position_tags: list[TaggedPosition] = Field(default_factory=list)
+    company_tags: list[TaggedCompany] = Field(default_factory=list)
+    raw_keywords: list[str] = Field(default_factory=list)
     possible_gap: str | None = None
     profile_parse_result: StudentProfile
     scoring_version: str = "recommendation-v1"

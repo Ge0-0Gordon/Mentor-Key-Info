@@ -15,11 +15,14 @@ from batch_extract import (
     REVIEW_EXCEL_NAME,
     SIMPLE_REVIEW_SHEETS,
     SUCCESS_CHECKPOINT_RELATIVE,
+    TAGGED_SIMPLE_REVIEW_SHEETS,
     BatchConfig,
+    load_success_checkpoint,
     run_batch,
 )
 from mentor_agent.schemas import MentorInput
 from mentor_agent.simple_schemas import SimpleMentorBatchResult, SimpleMentorResult
+from mentor_agent.tag_taxonomy import load_tag_taxonomy
 from tests.test_batch_extract import (
     FakeResponse,
     FakeSession,
@@ -101,6 +104,86 @@ def _simple_batch_success_response(request_kwargs: dict[str, Any]) -> FakeRespon
     )
 
 
+def _tagged_result_for_input(
+    mentor_input: MentorInput,
+    taxonomy_hash: str,
+) -> SimpleMentorResult:
+    payload = _simple_result_for_input(mentor_input).model_dump(
+        by_alias=True,
+        mode="json",
+    )
+    payload["prompt_version"] = "mentor-simple-tagged-v1"
+    payload["standard_tags_enabled"] = True
+    payload["taxonomy_hash"] = taxonomy_hash
+    payload["extraction"].update(
+        {
+            "industry_tags": [
+                {
+                    "tag": "AI/互联网/IT",
+                    "confidence": 0.91,
+                    "evidence": "软件与信息技术",
+                }
+            ],
+            "position_tags": [
+                {
+                    "tag": "产品经理",
+                    "relation_type": "firsthand_role",
+                    "confidence": 0.93,
+                    "raw_keywords": ["产品负责人"],
+                    "evidence": "产品负责人",
+                }
+            ],
+            "company_tags": [
+                {
+                    "company_name": f"匿名公司{mentor_input.original_fields.sequence_no}",
+                    "company_type": "互联网公司",
+                    "industry_tag": "AI/互联网/IT",
+                    "confidence": 0.9,
+                    "evidence": f"匿名公司{mentor_input.original_fields.sequence_no}",
+                }
+            ],
+            "raw_keywords": ["产品负责人"],
+            "review_required": False,
+            "review_reasons": [],
+        }
+    )
+    return SimpleMentorResult.model_validate(payload)
+
+
+def _tagged_batch_success_response(
+    taxonomy_hash: str,
+):
+    def response(request_kwargs: dict[str, Any]) -> FakeResponse:
+        content = request_kwargs["json"]["messages"][0]["content"]
+        payload = json.loads(content)
+        results = [
+            _tagged_result_for_input(
+                MentorInput.model_validate(record),
+                taxonomy_hash,
+            )
+            for record in payload["records"]
+        ]
+        batch_result = SimpleMentorBatchResult(
+            schema_version="simple-batch-v1",
+            results=results,
+        )
+        return FakeResponse(
+            payload={
+                "choices": [
+                    {
+                        "message": {
+                            "content": batch_result.model_dump_json(
+                                by_alias=True
+                            )
+                        }
+                    }
+                ]
+            }
+        )
+
+    return response
+
+
 def test_simple_mode_writes_jsonl_and_three_sheet_review_excel(
     tmp_path: Path,
 ) -> None:
@@ -131,6 +214,77 @@ def test_simple_mode_writes_jsonl_and_three_sheet_review_excel(
     assert tuple(workbook.sheetnames) == SIMPLE_REVIEW_SHEETS
     assert workbook[workbook.sheetnames[0]].max_row == 4
     assert workbook[workbook.sheetnames[1]].max_row > 3
+
+
+def test_tagged_mode_writes_seven_sheet_review_excel(tmp_path: Path) -> None:
+    source = tmp_path / "source.xlsx"
+    output = tmp_path / "outputs"
+    taxonomy_path = Path("configs/职位类型_2.txt")
+    taxonomy_hash = load_tag_taxonomy(taxonomy_path).taxonomy_hash
+    _write_source(source, [_mentor_row(1)])
+
+    summary = run_batch(
+        BatchConfig(
+            input_path=source,
+            output_dir=output,
+            mode="simple",
+            batch_size=2,
+            max_retries=0,
+            standard_tags_enabled=True,
+            taxonomy_path=taxonomy_path,
+        ),
+        session=FakeSession([_tagged_batch_success_response(taxonomy_hash)]),
+        printer=lambda message: None,
+    )
+
+    assert summary.success_count == 1
+    result = SimpleMentorResult.model_validate(
+        _read_jsonl(output / FINAL_RESULTS_NAME)[0]
+    )
+    assert result.standard_tags_enabled is True
+    assert result.taxonomy_hash == taxonomy_hash
+    workbook = load_workbook(output / REVIEW_EXCEL_NAME, read_only=True)
+    assert tuple(workbook.sheetnames) == TAGGED_SIMPLE_REVIEW_SHEETS
+    assert workbook["标准行业标签"].max_row == 2
+    assert workbook["标准职位标签"].max_row == 2
+    assert workbook["公司标签"].max_row == 2
+    assert workbook["人工审核项"].max_row == 1
+
+
+def test_checkpoint_requires_matching_taxonomy_hash(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoint.jsonl"
+    mentor_input = MentorInput.model_validate(
+        {
+            "task": "extract_mentor_key_info",
+            "input_schema_version": "1.0",
+            "mentor_id": "service_mentor:1",
+            "record_hash": "1" * 64,
+            "source_file": "source.xlsx",
+            "source_sheet": "服务导师",
+            "source_row": 2,
+            "original_fields": _mentor_row(1),
+        }
+    )
+    result = _tagged_result_for_input(mentor_input, "a" * 64)
+    checkpoint.write_text(result.model_dump_json() + "\n", encoding="utf-8")
+
+    matching = load_success_checkpoint(
+        checkpoint,
+        mode="simple",
+        standard_tags_enabled=True,
+        taxonomy_hash="a" * 64,
+        warn=lambda message: None,
+    )
+    mismatched = load_success_checkpoint(
+        checkpoint,
+        mode="simple",
+        standard_tags_enabled=True,
+        taxonomy_hash="b" * 64,
+        warn=lambda message: None,
+    )
+
+    assert len(matching) == 1
+    assert mismatched == {}
 
 
 def test_simple_resume_loads_only_simple_checkpoint(tmp_path: Path) -> None:

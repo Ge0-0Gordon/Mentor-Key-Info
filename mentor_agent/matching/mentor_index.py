@@ -44,6 +44,19 @@ def _selected_original_values(result: SimpleMentorResult) -> list[str]:
 
 def build_mentor_document(result: SimpleMentorResult) -> MentorDocument:
     extraction = result.extraction
+    standard_industries = [item.tag for item in extraction.industry_tags]
+    standard_positions = [item.tag for item in extraction.position_tags]
+    position_raw_keywords = [
+        keyword
+        for item in extraction.position_tags
+        for keyword in item.raw_keywords
+    ]
+    standard_companies = [
+        value
+        for item in extraction.company_tags
+        for value in (item.company_name, item.company_type)
+        if value
+    ]
     structured_parts = [
         result.mentor_id,
         result.original_fields.mentor_name or "",
@@ -59,6 +72,11 @@ def build_mentor_document(result: SimpleMentorResult) -> MentorDocument:
         *_flatten(extraction.target_mentees),
         *_flatten(extraction.highlights),
         *_flatten(extraction.keywords),
+        *standard_industries,
+        *standard_positions,
+        *standard_companies,
+        *position_raw_keywords,
+        *_flatten(extraction.raw_keywords),
     ]
     original_parts = _original_values(result)
     semantic_original_parts = _selected_original_values(result)

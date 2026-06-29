@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -20,6 +21,7 @@ from pydantic import ValidationError
 from mentor_agent.excel_io import ExcelLoadReport, load_mentor_inputs_with_report
 from mentor_agent.schemas import MentorInput, MentorResult
 from mentor_agent.simple_schemas import SimpleMentorBatchResult, SimpleMentorResult
+from mentor_agent.tag_taxonomy import load_tag_taxonomy
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:9000"
@@ -46,6 +48,15 @@ REVIEW_SHEETS = (
     "处理失败",
 )
 SIMPLE_REVIEW_SHEETS = ("导师总览", "关键词明细", "处理失败")
+TAGGED_SIMPLE_REVIEW_SHEETS = (
+    "导师总览",
+    "关键词明细",
+    "标准行业标签",
+    "标准职位标签",
+    "公司标签",
+    "人工审核项",
+    "处理失败",
+)
 
 _SENSITIVE_PATTERN = re.compile(
     r"(?i)(access\s*key|accesskey|api\s*key|authorization|\.env|token)"
@@ -70,6 +81,8 @@ class BatchConfig:
     verbose: bool = False
     mode: ExtractionMode = "simple"
     batch_size: int = 10
+    standard_tags_enabled: bool = False
+    taxonomy_path: Path = Path("configs/职位类型_2.txt")
 
 
 @dataclass(frozen=True)
@@ -145,6 +158,18 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _boolean_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{name} must be 'true' or 'false'")
+
+
 def _endpoint(base_url: str) -> str:
     return base_url.rstrip("/") + "/openai/v1/chat/completions"
 
@@ -172,12 +197,37 @@ def _result_model_for_mode(mode: ExtractionMode) -> type[ExtractionResult]:
     raise ValueError("mode must be 'simple' or 'full'")
 
 
+def _validate_standard_tag_metadata(
+    result: SimpleMentorResult,
+    *,
+    expected_enabled: bool,
+    expected_taxonomy_hash: str | None,
+    attempt_count: int,
+) -> None:
+    if result.standard_tags_enabled != expected_enabled:
+        raise _response_error(
+            "standard_tags_mode_mismatch",
+            "service standard-tags mode did not match batch configuration",
+            attempt_count,
+            retriable=False,
+        )
+    if expected_enabled and result.taxonomy_hash != expected_taxonomy_hash:
+        raise _response_error(
+            "taxonomy_hash_mismatch",
+            "service taxonomy hash did not match batch taxonomy",
+            attempt_count,
+            retriable=False,
+        )
+
+
 def _parse_http_response(
     response: Any,
     mentor_input: MentorInput,
     attempt_count: int,
     *,
     mode: ExtractionMode,
+    standard_tags_enabled: bool = False,
+    taxonomy_hash: str | None = None,
 ) -> ExtractionResult:
     status_code = int(response.status_code)
     if not 200 <= status_code < 300:
@@ -255,6 +305,13 @@ def _parse_http_response(
             "MentorResult identity did not match the requested MentorInput",
             attempt_count,
         )
+    if isinstance(result, SimpleMentorResult):
+        _validate_standard_tag_metadata(
+            result,
+            expected_enabled=standard_tags_enabled,
+            expected_taxonomy_hash=taxonomy_hash,
+            attempt_count=attempt_count,
+        )
     return result
 
 
@@ -262,6 +319,9 @@ def _parse_http_batch_response(
     response: Any,
     mentor_inputs: list[MentorInput],
     attempt_count: int,
+    *,
+    standard_tags_enabled: bool = False,
+    taxonomy_hash: str | None = None,
 ) -> list[SimpleMentorResult]:
     status_code = int(response.status_code)
     if not 200 <= status_code < 300:
@@ -343,6 +403,13 @@ def _parse_http_batch_response(
             "SimpleMentorBatchResult identities did not match requested MentorInputs",
             attempt_count,
         )
+    for result in batch_result.results:
+        _validate_standard_tag_metadata(
+            result,
+            expected_enabled=standard_tags_enabled,
+            expected_taxonomy_hash=taxonomy_hash,
+            attempt_count=attempt_count,
+        )
     return batch_result.results
 
 
@@ -355,6 +422,8 @@ def request_mentor_result(
     retry_sleep: float,
     session: Any,
     mode: ExtractionMode,
+    standard_tags_enabled: bool = False,
+    taxonomy_hash: str | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> ExtractionResult:
     """Call one mentor endpoint with bounded retries and classified failures."""
@@ -384,6 +453,8 @@ def request_mentor_result(
                 mentor_input,
                 attempt_count,
                 mode=mode,
+                standard_tags_enabled=standard_tags_enabled,
+                taxonomy_hash=taxonomy_hash,
             )
         except requests.Timeout:
             last_error = BatchItemError(
@@ -432,6 +503,8 @@ def request_simple_mentor_results_batch(
     max_retries: int,
     retry_sleep: float,
     session: Any,
+    standard_tags_enabled: bool = False,
+    taxonomy_hash: str | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> list[SimpleMentorResult]:
     """Call the simple batch endpoint with bounded retries."""
@@ -470,6 +543,8 @@ def request_simple_mentor_results_batch(
                 response,
                 mentor_inputs,
                 attempt_count,
+                standard_tags_enabled=standard_tags_enabled,
+                taxonomy_hash=taxonomy_hash,
             )
         except requests.Timeout:
             last_error = BatchItemError(
@@ -519,6 +594,8 @@ def load_success_checkpoint(
     path: Path,
     *,
     mode: ExtractionMode,
+    standard_tags_enabled: bool = False,
+    taxonomy_hash: str | None = None,
     warn: Callable[[str], None] = print,
 ) -> dict[tuple[str, str], ExtractionResult]:
     successes: dict[tuple[str, str], ExtractionResult] = {}
@@ -537,6 +614,22 @@ def load_success_checkpoint(
                     f"warning: skipped invalid or mismatched {mode} checkpoint line {line_number}"
                 )
                 continue
+            if isinstance(result, SimpleMentorResult):
+                if result.standard_tags_enabled != standard_tags_enabled:
+                    warn(
+                        "warning: skipped simple checkpoint line "
+                        f"{line_number} due to standard-tags mode mismatch"
+                    )
+                    continue
+                if (
+                    standard_tags_enabled
+                    and result.taxonomy_hash != taxonomy_hash
+                ):
+                    warn(
+                        "warning: skipped simple checkpoint line "
+                        f"{line_number} due to taxonomy hash mismatch"
+                    )
+                    continue
             successes[(result.mentor_id, result.record_hash)] = result
     return successes
 
@@ -973,15 +1066,22 @@ def write_simple_review_excel(
     path: Path,
     results: list[SimpleMentorResult],
     failures: list[dict[str, Any]],
+    *,
+    standard_tags_enabled: bool | None = None,
 ) -> None:
     """Create a compact simple-mode review workbook."""
 
     workbook = Workbook()
     workbook.remove(workbook.active)
+    tagged = (
+        any(result.standard_tags_enabled for result in results)
+        if standard_tags_enabled is None
+        else standard_tags_enabled
+    )
 
     overview_rows = []
     detail_rows = []
-    categories = (
+    categories = [
         "industries",
         "companies",
         "roles",
@@ -991,33 +1091,53 @@ def write_simple_review_excel(
         "target_mentees",
         "highlights",
         "keywords",
-    )
+    ]
+    if tagged:
+        categories.append("raw_keywords")
+
+    industry_tag_rows = []
+    position_tag_rows = []
+    company_tag_rows = []
+    review_rows = []
 
     for result in results:
         original = result.original_fields
         extraction = result.extraction
-        overview_rows.append(
-            [
-                result.mentor_id,
-                original.mentor_name,
-                original.gender,
-                original.city,
-                original.career_years,
-                original.industry_tags,
-                _join_keywords(extraction.industries),
-                _join_keywords(extraction.companies),
-                _join_keywords(extraction.roles),
-                _join_keywords(extraction.skills),
-                _join_keywords(extraction.credentials),
-                _join_keywords(extraction.education),
-                _join_keywords(extraction.target_mentees),
-                _join_keywords(extraction.highlights),
-                _join_keywords(extraction.keywords),
-                extraction.summary,
-                result.processing.latency_ms,
-                result.processing.attempt_count,
-            ]
-        )
+        overview_row = [
+            result.mentor_id,
+            original.mentor_name,
+            original.gender,
+            original.city,
+            original.career_years,
+            original.industry_tags,
+            _join_keywords(extraction.industries),
+            _join_keywords(extraction.companies),
+            _join_keywords(extraction.roles),
+            _join_keywords(extraction.skills),
+            _join_keywords(extraction.credentials),
+            _join_keywords(extraction.education),
+            _join_keywords(extraction.target_mentees),
+            _join_keywords(extraction.highlights),
+            _join_keywords(extraction.keywords),
+            extraction.summary,
+            result.processing.latency_ms,
+            result.processing.attempt_count,
+        ]
+        if tagged:
+            overview_row.extend(
+                [
+                    _join_keywords(
+                        [item.tag for item in extraction.industry_tags]
+                    ),
+                    _join_keywords(
+                        [item.tag for item in extraction.position_tags]
+                    ),
+                    extraction.review_required,
+                    _join_keywords(extraction.review_reasons),
+                    result.taxonomy_hash,
+                ]
+            )
+        overview_rows.append(overview_row)
         for category in categories:
             for keyword in getattr(extraction, category):
                 detail_rows.append(
@@ -1028,30 +1148,85 @@ def write_simple_review_excel(
                         keyword,
                     ]
                 )
+        if tagged:
+            for item in extraction.industry_tags:
+                industry_tag_rows.append(
+                    [
+                        result.mentor_id,
+                        original.mentor_name,
+                        item.tag,
+                        item.confidence,
+                        item.evidence,
+                    ]
+                )
+            for item in extraction.position_tags:
+                position_tag_rows.append(
+                    [
+                        result.mentor_id,
+                        original.mentor_name,
+                        item.tag,
+                        _enum_value(item.relation_type),
+                        item.confidence,
+                        _join_keywords(item.raw_keywords),
+                        item.evidence,
+                    ]
+                )
+            for item in extraction.company_tags:
+                company_tag_rows.append(
+                    [
+                        result.mentor_id,
+                        original.mentor_name,
+                        item.company_name,
+                        item.company_type,
+                        item.industry_tag,
+                        item.confidence,
+                        item.evidence,
+                    ]
+                )
+            for reason in extraction.review_reasons:
+                review_rows.append(
+                    [
+                        result.mentor_id,
+                        original.mentor_name,
+                        extraction.review_required,
+                        reason,
+                    ]
+                )
 
+    overview_headers = [
+        "mentor_id",
+        "导师姓名",
+        "性别",
+        "城市",
+        "职业年限",
+        "行业标签原文",
+        "industries",
+        "companies",
+        "roles",
+        "skills",
+        "credentials",
+        "education",
+        "target_mentees",
+        "highlights",
+        "keywords",
+        "summary",
+        "latency_ms",
+        "attempt_count",
+    ]
+    if tagged:
+        overview_headers.extend(
+            [
+                "standard_industry_tags",
+                "standard_position_tags",
+                "review_required",
+                "review_reasons",
+                "taxonomy_hash",
+            ]
+        )
     _add_sheet(
         workbook,
         "导师总览",
-        [
-            "mentor_id",
-            "导师姓名",
-            "性别",
-            "城市",
-            "职业年限",
-            "行业标签原文",
-            "industries",
-            "companies",
-            "roles",
-            "skills",
-            "credentials",
-            "education",
-            "target_mentees",
-            "highlights",
-            "keywords",
-            "summary",
-            "latency_ms",
-            "attempt_count",
-        ],
+        overview_headers,
         overview_rows,
     )
     _add_sheet(
@@ -1060,6 +1235,47 @@ def write_simple_review_excel(
         ["mentor_id", "导师姓名", "category", "keyword"],
         detail_rows,
     )
+    if tagged:
+        _add_sheet(
+            workbook,
+            "标准行业标签",
+            ["mentor_id", "导师姓名", "tag", "confidence", "evidence"],
+            industry_tag_rows,
+        )
+        _add_sheet(
+            workbook,
+            "标准职位标签",
+            [
+                "mentor_id",
+                "导师姓名",
+                "tag",
+                "relation_type",
+                "confidence",
+                "raw_keywords",
+                "evidence",
+            ],
+            position_tag_rows,
+        )
+        _add_sheet(
+            workbook,
+            "公司标签",
+            [
+                "mentor_id",
+                "导师姓名",
+                "company_name",
+                "company_type",
+                "industry_tag",
+                "confidence",
+                "evidence",
+            ],
+            company_tag_rows,
+        )
+        _add_sheet(
+            workbook,
+            "人工审核项",
+            ["mentor_id", "导师姓名", "review_required", "review_reason"],
+            review_rows,
+        )
     _add_sheet(
         workbook,
         "处理失败",
@@ -1136,6 +1352,14 @@ def run_batch(
     """Run one batch without allowing a single row failure to abort the batch."""
 
     _validate_config(config)
+    standard_tags_enabled = (
+        config.mode == "simple" and config.standard_tags_enabled
+    )
+    taxonomy_hash = (
+        load_tag_taxonomy(config.taxonomy_path).taxonomy_hash
+        if standard_tags_enabled
+        else None
+    )
     report = load_mentor_inputs_with_report(config.input_path)
     all_inputs = report.inputs
     selected = all_inputs[config.offset :]
@@ -1166,6 +1390,8 @@ def run_batch(
     checkpoint_results = load_success_checkpoint(
         checkpoint_path,
         mode=config.mode,
+        standard_tags_enabled=standard_tags_enabled,
+        taxonomy_hash=taxonomy_hash,
         warn=printer,
     )
     failed_current_keys: set[tuple[str, str]] = set()
@@ -1205,6 +1431,8 @@ def run_batch(
                     retry_sleep=config.retry_sleep,
                     session=http_session,
                     mode=config.mode,
+                    standard_tags_enabled=standard_tags_enabled,
+                    taxonomy_hash=taxonomy_hash,
                     sleep_fn=sleep_fn,
                 )
             except BatchItemError as exc:
@@ -1273,6 +1501,8 @@ def run_batch(
                         max_retries=config.max_retries,
                         retry_sleep=config.retry_sleep,
                         session=http_session,
+                        standard_tags_enabled=standard_tags_enabled,
+                        taxonomy_hash=taxonomy_hash,
                         sleep_fn=sleep_fn,
                     )
                     results_by_id = {
@@ -1322,6 +1552,7 @@ def run_batch(
                     if isinstance(result, SimpleMentorResult)
                 ],
                 _read_failure_history(failed_path),
+                standard_tags_enabled=standard_tags_enabled,
             )
         else:
             write_review_excel(
@@ -1400,6 +1631,10 @@ def main(argv: list[str] | None = None) -> int:
         verbose=args.verbose,
         mode=args.mode,
         batch_size=args.batch_size,
+        standard_tags_enabled=_boolean_env("ENABLE_STANDARD_TAGS", False),
+        taxonomy_path=Path(
+            os.getenv("TAG_TAXONOMY_PATH", "configs/职位类型_2.txt")
+        ),
     )
     summary = run_batch(config)
     if not config.verbose and not config.dry_run:

@@ -64,6 +64,10 @@ def build_match_result(
             target_mentees=card.target_mentees,
             highlights=card.highlights,
             keywords=card.keywords,
+            industry_tags=card.industry_tags,
+            position_tags=card.position_tags,
+            company_tags=card.company_tags,
+            raw_keywords=card.raw_keywords,
             summary=card.summary,
         )
         debug = MatchDebugInfo(
@@ -74,6 +78,10 @@ def build_match_result(
             llm_fit_score=rerank_item.llm_fit_score if rerank_item else None,
             score_breakdown=card.score_breakdown,
             matched_signals=card.matched_signals,
+            industry_tags=card.industry_tags,
+            position_tags=card.position_tags,
+            company_tags=card.company_tags,
+            raw_keywords=card.raw_keywords,
             possible_gap=possible_gap(card, profile),
             profile_parse_result=profile,
             rerank_note=rerank_item.rerank_note if rerank_item else None,
@@ -133,11 +141,35 @@ def _join_values(values: list[str], limit: int = 4) -> str:
     return "、".join(values[:limit]) if values else "-"
 
 
+def _display_industries(display: MentorDisplayCard) -> list[str]:
+    if not display.industry_tags:
+        return display.industries
+    return [
+        f"{item.tag} ({item.confidence:.2f})"
+        for item in display.industry_tags
+    ]
+
+
+def _display_positions(display: MentorDisplayCard) -> list[str]:
+    if not display.position_tags:
+        return display.roles
+    return [
+        f"{item.tag} ({item.relation_type.value}, {item.confidence:.2f})"
+        for item in display.position_tags
+    ]
+
+
+def _display_companies(display: MentorDisplayCard) -> list[str]:
+    if not display.company_tags:
+        return display.companies
+    return [item.company_name for item in display.company_tags]
+
+
 def format_markdown(result: MatchResult, *, show_score: bool = False) -> str:
     score_columns = " | final_score | company | role | skill | stage | industry | semantic" if show_score else ""
     score_header = " | ---: | ---: | ---: | ---: | ---: | ---: | ---:" if show_score else ""
     lines = [
-        "| rank | mentor_id | 导师姓名 | 城市 | 职业年限 | 相关行业 | 相关公司/机构 | 岗位/身份 | 擅长方向 | 可辅导人群 | 简介"
+        "| rank | mentor_id | 导师姓名 | 城市 | 职业年限 | 标准/相关行业 | 标准/相关公司 | 标准职位/关系 | 擅长方向 | 可辅导人群 | 简介"
         + score_columns
         + " |",
         "| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---"
@@ -158,8 +190,10 @@ def format_markdown(result: MatchResult, *, show_score: bool = False) -> str:
         lines.append(
             f"| {display.rank} | {display.mentor_id} | {display.name or '-'} | "
             f"{display.city or '-'} | {display.years_experience or '-'} | "
-            f"{_join_values(display.industries)} | {_join_values(display.companies)} | "
-            f"{_join_values(display.roles)} | {_join_values(display.skills)} | "
+            f"{_join_values(_display_industries(display))} | "
+            f"{_join_values(_display_companies(display))} | "
+            f"{_join_values(_display_positions(display))} | "
+            f"{_join_values(display.skills)} | "
             f"{_join_values(display.target_mentees)} | {display.summary or '-'}"
             f"{score_cell} |"
         )
@@ -246,8 +280,12 @@ def format_rerank_report(
                 f"- city: {display.city or '-'}",
                 f"- years_experience: {display.years_experience or '-'}",
                 f"- industries: {_join_values(display.industries)}",
+                f"- standard_industries: {_join_values(_display_industries(display))}",
                 f"- companies: {_join_values(display.companies)}",
+                f"- standard_companies: {_join_values(_display_companies(display))}",
                 f"- roles: {_join_values(display.roles)}",
+                f"- standard_positions: {_join_values(_display_positions(display))}",
+                f"- raw_keywords: {_join_values(display.raw_keywords)}",
                 f"- skills: {_join_values(display.skills)}",
                 f"- target_mentees: {_join_values(display.target_mentees)}",
                 f"- summary: {display.summary or '-'}",
@@ -284,8 +322,13 @@ def _filters(result: MatchResult) -> dict[str, list[str]]:
     for item in result.results:
         display = item.display
         buckets["companies"].extend(display.companies)
+        buckets["companies"].extend(
+            item.company_name for item in display.company_tags
+        )
         buckets["roles"].extend(display.roles)
+        buckets["roles"].extend(item.tag for item in display.position_tags)
         buckets["industries"].extend(display.industries)
+        buckets["industries"].extend(item.tag for item in display.industry_tags)
         buckets["skills"].extend(display.skills)
         if display.city:
             buckets["cities"].append(str(display.city))

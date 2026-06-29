@@ -33,6 +33,7 @@ AVAILABILITY_FACTOR = 1.0
 ROLE_SEMANTIC_RAW_MIN = 0.50
 HELP_SEMANTIC_RAW_MIN = 0.45
 SCOPED_SEMANTIC_PERCENTILE_MIN = 60.0
+STANDARD_TAG_CONFIDENCE_MIN = 0.70
 
 
 def _has_cjk(value: str) -> bool:
@@ -52,6 +53,13 @@ class FieldMatchConfig:
     structured_terms: list[str]
     fallback_terms: list[str]
     original_text: str
+    structured_source_field: str = "structured"
+    fallback_source_field: str = "summary_highlights_keywords"
+    structured_exact_weight: float = 1.0
+    structured_alias_weight: float = 0.9
+    structured_substring_weight: float = 0.75
+    fallback_weight: float = 0.7
+    raw_text_weight: float = 0.5
 
 
 @dataclass
@@ -84,6 +92,13 @@ def _best_match_for_term(
     fallback_terms: list[str],
     original_text: str,
     aliases: AliasIndex,
+    structured_source_field: str = "structured",
+    fallback_source_field: str = "summary_highlights_keywords",
+    structured_exact_weight: float = 1.0,
+    structured_alias_weight: float = 0.9,
+    structured_substring_weight: float = 0.75,
+    fallback_weight: float = 0.7,
+    raw_text_weight: float = 0.5,
 ) -> MatchedSignal | None:
     variants = aliases.variants(category, query_term)
     canonical = aliases.canonical_for(category, query_term)
@@ -108,9 +123,13 @@ def _best_match_for_term(
                         query_term=query_term,
                         matched_term=source_term,
                         canonical=canonical,
-                        source_field="structured",
+                        source_field=structured_source_field,
                         match_type="exact" if normalize_text(query_term) == source_norm else "alias",
-                        weight=1.0 if normalize_text(query_term) == source_norm else 0.9,
+                        weight=(
+                            structured_exact_weight
+                            if normalize_text(query_term) == source_norm
+                            else structured_alias_weight
+                        ),
                     )
                 )
             elif (
@@ -123,9 +142,9 @@ def _best_match_for_term(
                         query_term=query_term,
                         matched_term=source_term,
                         canonical=canonical,
-                        source_field="structured",
+                        source_field=structured_source_field,
                         match_type="substring",
-                        weight=0.75,
+                        weight=structured_substring_weight,
                     )
                 )
 
@@ -137,9 +156,9 @@ def _best_match_for_term(
                         query_term=query_term,
                         matched_term=source_term,
                         canonical=canonical,
-                        source_field="summary_highlights_keywords",
+                        source_field=fallback_source_field,
                         match_type="substring",
-                        weight=0.7,
+                        weight=fallback_weight,
                     )
                 )
 
@@ -152,31 +171,47 @@ def _best_match_for_term(
                     canonical=canonical,
                     source_field="raw_text",
                     match_type="raw_text",
-                    weight=0.5,
+                    weight=raw_text_weight,
                 )
             )
 
     return best
 
 
-def _score_category(config: FieldMatchConfig, aliases: AliasIndex) -> tuple[float, list[MatchedSignal]]:
-    query_terms = [term for term in config.query_terms if str(term).strip()]
+def _score_config_group(
+    configs: list[FieldMatchConfig],
+    aliases: AliasIndex,
+) -> tuple[float, list[MatchedSignal]]:
+    if not configs:
+        return 0.0, []
+    query_terms = [term for term in configs[0].query_terms if str(term).strip()]
     if not query_terms:
         return 0.0, []
-    signals = []
+    signals: list[MatchedSignal] = []
     total_weight = 0.0
     for query_term in query_terms:
-        signal = _best_match_for_term(
-            query_term,
-            category=config.category,
-            structured_terms=config.structured_terms,
-            fallback_terms=config.fallback_terms,
-            original_text=config.original_text,
-            aliases=aliases,
-        )
-        if signal:
-            signals.append(signal)
-            total_weight += signal.weight
+        best: MatchedSignal | None = None
+        for config in configs:
+            signal = _best_match_for_term(
+                query_term,
+                category=config.category,
+                structured_terms=config.structured_terms,
+                fallback_terms=config.fallback_terms,
+                original_text=config.original_text,
+                aliases=aliases,
+                structured_source_field=config.structured_source_field,
+                fallback_source_field=config.fallback_source_field,
+                structured_exact_weight=config.structured_exact_weight,
+                structured_alias_weight=config.structured_alias_weight,
+                structured_substring_weight=config.structured_substring_weight,
+                fallback_weight=config.fallback_weight,
+                raw_text_weight=config.raw_text_weight,
+            )
+            if signal and (best is None or signal.weight > best.weight):
+                best = signal
+        if best:
+            signals.append(best)
+            total_weight += best.weight
     return min(100.0, 100.0 * total_weight / len(query_terms)), signals
 
 
@@ -189,7 +224,12 @@ def _merge_signals(*groups: list[MatchedSignal]) -> list[MatchedSignal]:
     merged = []
     for group in groups:
         for signal in group:
-            key = (signal.query_term, signal.matched_term, signal.source_field, signal.match_type)
+            key = (
+                signal.query_term,
+                signal.matched_term,
+                signal.source_field,
+                signal.match_type,
+            )
             if key not in seen:
                 seen.add(key)
                 merged.append(signal)
@@ -234,7 +274,14 @@ def _provider_method(method: str) -> str:
 def _mentor_role_text(document: MentorDocument) -> str:
     extraction = document.result.extraction
     parts = [
+        *(item.tag for item in extraction.position_tags),
+        *(
+            keyword
+            for item in extraction.position_tags
+            for keyword in item.raw_keywords
+        ),
         *extraction.roles,
+        *extraction.raw_keywords,
         *extraction.keywords,
         *extraction.highlights,
         extraction.summary or "",
@@ -255,9 +302,18 @@ def _mentor_help_text(document: MentorDocument) -> str:
 
 def _role_text_quality(document: MentorDocument) -> str:
     extraction = document.result.extraction
-    if extraction.roles:
+    if extraction.roles or any(
+        item.confidence >= STANDARD_TAG_CONFIDENCE_MIN
+        for item in extraction.position_tags
+    ):
         return "strong"
-    if extraction.keywords or extraction.highlights or extraction.summary:
+    if (
+        extraction.position_tags
+        or extraction.raw_keywords
+        or extraction.keywords
+        or extraction.highlights
+        or extraction.summary
+    ):
         return "weak"
     return "none"
 
@@ -526,49 +582,124 @@ def score_mentor(
         *(extraction.highlights or []),
         extraction.summary or "",
     ]
+    high_industry_tags = [
+        item.tag
+        for item in extraction.industry_tags
+        if item.confidence >= STANDARD_TAG_CONFIDENCE_MIN
+    ]
+    low_industry_tags = [
+        item.tag
+        for item in extraction.industry_tags
+        if item.confidence < STANDARD_TAG_CONFIDENCE_MIN
+    ]
+    high_position_tags = [
+        item.tag
+        for item in extraction.position_tags
+        if item.confidence >= STANDARD_TAG_CONFIDENCE_MIN
+    ]
+    low_position_tags = [
+        item.tag
+        for item in extraction.position_tags
+        if item.confidence < STANDARD_TAG_CONFIDENCE_MIN
+    ]
+    position_raw_keywords = [
+        keyword
+        for item in extraction.position_tags
+        for keyword in item.raw_keywords
+    ]
+    high_company_names = [
+        item.company_name
+        for item in extraction.company_tags
+        if item.confidence >= STANDARD_TAG_CONFIDENCE_MIN
+    ]
+    low_company_names = [
+        item.company_name
+        for item in extraction.company_tags
+        if item.confidence < STANDARD_TAG_CONFIDENCE_MIN
+    ]
+    company_types = [
+        item.company_type
+        for item in extraction.company_tags
+        if item.company_type
+    ]
+    has_standard_matching_data = bool(
+        extraction.industry_tags
+        or extraction.position_tags
+        or extraction.company_tags
+        or extraction.raw_keywords
+    )
+    legacy_source_fields = {
+        "company_match": "companies",
+        "role_match": "roles",
+        "skill_or_help_match": "skills",
+        "target_mentee_match": "target_mentees",
+        "industry_match": "industries",
+        "keyword_match": "legacy_keywords",
+        "background_match": "legacy_background",
+    }
+    if not has_standard_matching_data:
+        legacy_source_fields = {
+            score_name: "structured"
+            for score_name in legacy_source_fields
+        }
     original = result.original_fields
     matched = MatchedSignals()
 
-    category_configs = {
+    query_terms_by_score = {
+        "company_match": profile.target_companies,
+        "role_match": profile.target_roles,
+        "skill_or_help_match": profile.needed_help,
+        "target_mentee_match": profile.current_stage,
+        "industry_match": profile.target_industries,
+        "keyword_match": profile.keywords[:10],
+        "background_match": profile.preferred_background,
+    }
+
+    legacy_configs = {
         "company_match": FieldMatchConfig(
             category="companies",
             signal_field="companies",
             query_terms=profile.target_companies,
             structured_terms=extraction.companies,
-            fallback_terms=fallback_terms,
-            original_text=document.original_text,
+            fallback_terms=[],
+            original_text="",
+            structured_source_field=legacy_source_fields["company_match"],
         ),
         "role_match": FieldMatchConfig(
             category="roles",
             signal_field="roles",
             query_terms=profile.target_roles,
             structured_terms=extraction.roles,
-            fallback_terms=fallback_terms,
-            original_text=document.original_text,
+            fallback_terms=[],
+            original_text="",
+            structured_source_field=legacy_source_fields["role_match"],
         ),
         "skill_or_help_match": FieldMatchConfig(
             category="skills",
             signal_field="skills",
             query_terms=profile.needed_help,
             structured_terms=extraction.skills,
-            fallback_terms=fallback_terms,
-            original_text=document.original_text,
+            fallback_terms=[],
+            original_text="",
+            structured_source_field=legacy_source_fields["skill_or_help_match"],
         ),
         "target_mentee_match": FieldMatchConfig(
             category="stages",
             signal_field="target_mentees",
             query_terms=profile.current_stage,
             structured_terms=[*extraction.target_mentees, str(original.coachable_levels or "")],
-            fallback_terms=fallback_terms,
-            original_text=document.original_text,
+            fallback_terms=[],
+            original_text="",
+            structured_source_field=legacy_source_fields["target_mentee_match"],
         ),
         "industry_match": FieldMatchConfig(
             category="industries",
             signal_field="industries",
             query_terms=profile.target_industries,
             structured_terms=[*extraction.industries, str(original.industry_tags or "")],
-            fallback_terms=fallback_terms,
-            original_text=document.original_text,
+            fallback_terms=[],
+            original_text="",
+            structured_source_field=legacy_source_fields["industry_match"],
         ),
         "keyword_match": FieldMatchConfig(
             category="skills",
@@ -581,8 +712,9 @@ def score_mentor(
                 *extraction.companies,
                 *extraction.industries,
             ],
-            fallback_terms=fallback_terms,
-            original_text=document.search_text,
+            fallback_terms=[],
+            original_text="",
+            structured_source_field=legacy_source_fields["keyword_match"],
         ),
         "background_match": FieldMatchConfig(
             category="skills",
@@ -596,37 +728,205 @@ def score_mentor(
                 *extraction.industries,
                 *(extraction.highlights or []),
             ],
-            fallback_terms=fallback_terms,
-            original_text=document.search_text,
+            fallback_terms=[],
+            original_text="",
+            structured_source_field=legacy_source_fields["background_match"],
         ),
+    }
+
+    standard_configs = {
+        "company_match": [
+            FieldMatchConfig(
+                category="companies",
+                signal_field="companies",
+                query_terms=profile.target_companies,
+                structured_terms=high_company_names,
+                fallback_terms=[],
+                original_text="",
+                structured_source_field="company_tags.company_name",
+            )
+        ],
+        "role_match": [
+            FieldMatchConfig(
+                category="roles",
+                signal_field="roles",
+                query_terms=profile.target_roles,
+                structured_terms=high_position_tags,
+                fallback_terms=[],
+                original_text="",
+                structured_source_field="position_tags.tag",
+            )
+        ],
+        "industry_match": [
+            FieldMatchConfig(
+                category="industries",
+                signal_field="industries",
+                query_terms=profile.target_industries,
+                structured_terms=high_industry_tags,
+                fallback_terms=[],
+                original_text="",
+                structured_source_field="industry_tags.tag",
+            )
+        ],
+    }
+
+    weak_configs = {
+        "company_match": [
+            FieldMatchConfig(
+                category="companies",
+                signal_field="companies",
+                query_terms=profile.target_companies,
+                structured_terms=low_company_names,
+                fallback_terms=[],
+                original_text="",
+                structured_source_field="company_tags.company_name",
+                structured_exact_weight=0.65,
+                structured_alias_weight=0.60,
+                structured_substring_weight=0.50,
+            ),
+            FieldMatchConfig(
+                category="companies",
+                signal_field="companies",
+                query_terms=profile.target_companies,
+                structured_terms=company_types,
+                fallback_terms=[],
+                original_text="",
+                structured_source_field="company_tags.company_type",
+                structured_exact_weight=0.55,
+                structured_alias_weight=0.50,
+                structured_substring_weight=0.45,
+            ),
+        ],
+        "role_match": [
+            FieldMatchConfig(
+                category="roles",
+                signal_field="roles",
+                query_terms=profile.target_roles,
+                structured_terms=low_position_tags,
+                fallback_terms=[],
+                original_text="",
+                structured_source_field="position_tags.tag",
+                structured_exact_weight=0.65,
+                structured_alias_weight=0.60,
+                structured_substring_weight=0.50,
+            ),
+            FieldMatchConfig(
+                category="roles",
+                signal_field="roles",
+                query_terms=profile.target_roles,
+                structured_terms=[
+                    *position_raw_keywords,
+                    *extraction.raw_keywords,
+                ],
+                fallback_terms=[],
+                original_text="",
+                structured_source_field="raw_keywords",
+                structured_exact_weight=0.60,
+                structured_alias_weight=0.55,
+                structured_substring_weight=0.45,
+            ),
+        ],
+        "industry_match": [
+            FieldMatchConfig(
+                category="industries",
+                signal_field="industries",
+                query_terms=profile.target_industries,
+                structured_terms=low_industry_tags,
+                fallback_terms=[],
+                original_text="",
+                structured_source_field="industry_tags.tag",
+                structured_exact_weight=0.65,
+                structured_alias_weight=0.60,
+                structured_substring_weight=0.50,
+            )
+        ],
+        "keyword_match": [
+            FieldMatchConfig(
+                category="skills",
+                signal_field="keywords",
+                query_terms=profile.keywords[:10],
+                structured_terms=[
+                    *position_raw_keywords,
+                    *extraction.raw_keywords,
+                ],
+                fallback_terms=[],
+                original_text="",
+                structured_source_field="raw_keywords",
+                structured_exact_weight=0.60,
+                structured_alias_weight=0.55,
+                structured_substring_weight=0.45,
+            )
+        ],
+        "background_match": [
+            FieldMatchConfig(
+                category="skills",
+                signal_field="keywords",
+                query_terms=profile.preferred_background,
+                structured_terms=[
+                    *position_raw_keywords,
+                    *extraction.raw_keywords,
+                ],
+                fallback_terms=[],
+                original_text="",
+                structured_source_field="raw_keywords",
+                structured_exact_weight=0.60,
+                structured_alias_weight=0.55,
+                structured_substring_weight=0.45,
+            )
+        ],
     }
 
     scores: dict[str, float] = {}
     structured_scores: dict[str, float] = {}
     raw_text_scores: dict[str, float] = {}
-    for score_name, config in category_configs.items():
-        structured_config = FieldMatchConfig(
-            category=config.category,
-            signal_field=config.signal_field,
-            query_terms=config.query_terms,
-            structured_terms=config.structured_terms,
-            fallback_terms=[],
-            original_text="",
-        )
+    for score_name, legacy_config in legacy_configs.items():
+        structured_group = [
+            *standard_configs.get(score_name, []),
+            legacy_config,
+        ]
         raw_text_config = FieldMatchConfig(
-            category=config.category,
-            signal_field=config.signal_field,
-            query_terms=config.query_terms,
+            category=legacy_config.category,
+            signal_field=legacy_config.signal_field,
+            query_terms=legacy_config.query_terms,
             structured_terms=[],
-            fallback_terms=config.fallback_terms,
-            original_text=config.original_text,
+            fallback_terms=fallback_terms,
+            original_text=(
+                document.search_text
+                if score_name in {"keyword_match", "background_match"}
+                else document.original_text
+            ),
         )
-        structured_score, structured_signals = _score_category(structured_config, aliases)
-        raw_text_score, raw_text_signals = _score_category(raw_text_config, aliases)
+        raw_group = [
+            *weak_configs.get(score_name, []),
+            raw_text_config,
+        ]
+        structured_score, structured_signals = _score_config_group(
+            structured_group,
+            aliases,
+        )
+        raw_text_score, raw_text_signals = _score_config_group(
+            raw_group,
+            aliases,
+        )
+        if has_standard_matching_data:
+            final_score, final_signals = _score_config_group(
+                [*structured_group, *raw_group],
+                aliases,
+            )
+        else:
+            final_score = max(structured_score, raw_text_score)
+            final_signals = _merge_signals(
+                structured_signals,
+                raw_text_signals,
+            )
         structured_scores[score_name] = structured_score
         raw_text_scores[score_name] = raw_text_score
-        scores[score_name] = max(structured_score, raw_text_score)
-        _set_signal_field(matched, config.signal_field, _merge_signals(structured_signals, raw_text_signals))
+        scores[score_name] = final_score
+        _set_signal_field(
+            matched,
+            legacy_config.signal_field,
+            final_signals,
+        )
 
     category_weights = {
         "company_match": WEIGHTS["company_match"],
@@ -640,7 +940,7 @@ def score_mentor(
     active_weights = {
         name: weight
         for name, weight in category_weights.items()
-        if category_configs[name].query_terms
+        if query_terms_by_score[name]
     }
     structured_total = _weighted_category_total(structured_scores, active_weights)
     raw_text_total = _weighted_category_total(raw_text_scores, active_weights)
@@ -747,6 +1047,10 @@ def score_mentor(
         target_mentees=extraction.target_mentees,
         highlights=extraction.highlights,
         keywords=extraction.keywords,
+        industry_tags=extraction.industry_tags,
+        position_tags=extraction.position_tags,
+        company_tags=extraction.company_tags,
+        raw_keywords=extraction.raw_keywords,
         summary=extraction.summary,
         matched_signals=matched,
         rule_score=total,

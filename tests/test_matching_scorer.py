@@ -13,7 +13,10 @@ def _write_aliases(path: Path) -> Path:
         json.dumps(
             {
                 "companies": [{"canonical": "字节跳动", "aliases": ["字节", "ByteDance"]}],
-                "roles": [{"canonical": "产品经理", "aliases": ["PM", "产品"]}],
+                "roles": [
+                    {"canonical": "产品经理", "aliases": ["PM", "产品"]},
+                    {"canonical": "人工智能", "aliases": ["AI"]},
+                ],
                 "skills": [{"canonical": "简历优化", "aliases": ["改简历"]}],
                 "stages": [{"canonical": "留学生", "aliases": ["海归"]}],
                 "industries": [{"canonical": "互联网", "aliases": ["大厂"]}],
@@ -154,3 +157,29 @@ def test_rank_candidates_returns_top_k_order(tmp_path):
     cards = rank_candidates(documents, profile, aliases, candidate_pool_size=2)
 
     assert [card.mentor_id for card in cards] == ["service_mentor:1", "service_mentor:2"]
+
+
+def test_legacy_jsonl_keeps_max_structured_raw_aggregation(tmp_path):
+    aliases = AliasIndex.from_path(_write_aliases(tmp_path / "aliases.json"))
+    result_path = _write_results(
+        tmp_path / "mentor_results.jsonl",
+        [
+            _result(
+                mentor_id="service_mentor:1",
+                roles=["产品经理"],
+                career_history="参与人工智能相关项目。",
+            )
+        ],
+    )
+    document = load_mentor_documents(result_path)[0]
+
+    card = score_mentor(
+        document,
+        profile=extract_student_profile(
+            "想找产品经理或AI岗位",
+            aliases,
+        ),
+        aliases=aliases,
+    )
+
+    assert card.score_breakdown.role_match == 60

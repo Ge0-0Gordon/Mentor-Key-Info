@@ -13,7 +13,7 @@ def test_student_profile_parses_ev_and_consulting_aliases():
     assert "产品经理" in ev_profile.target_roles
     assert "简历优化" in ev_profile.needed_help
     assert "职场人" in ev_profile.current_stage
-    assert "新能源汽车" in ev_profile.target_industries
+    assert "汽车/机械/制造" in ev_profile.target_industries
 
     consulting_profile = extract_student_profile(
         "我是海归硕士，想做咨询或战略岗，目标 MBB 或互联网战略，需要 case 面试辅导",
@@ -33,8 +33,8 @@ def test_student_profile_parses_finance_ai_and_operations_aliases():
         aliases,
     )
     assert "金融" in finance_profile.target_industries
-    assert "投行" in finance_profile.target_roles
-    assert "证券" in finance_profile.target_roles
+    assert "投融资" in finance_profile.target_roles
+    assert "证券/基金/期货" in finance_profile.target_roles
     assert "简历优化" in finance_profile.needed_help
     assert "模拟面试" in finance_profile.needed_help
 
@@ -42,8 +42,15 @@ def test_student_profile_parses_finance_ai_and_operations_aliases():
         "我想找AI大模型相关岗位，希望导师有互联网或人工智能行业背景",
         aliases,
     )
-    assert "人工智能" in ai_profile.target_industries
-    assert "互联网" in ai_profile.target_industries
+    assert ai_profile.target_roles == ["人工智能"]
+    assert ai_profile.target_industries == ["AI/互联网/IT"]
+
+    role_only_profile = extract_student_profile(
+        "我想找AI大模型岗位，需要简历优化",
+        aliases,
+    )
+    assert role_only_profile.target_roles == ["人工智能"]
+    assert role_only_profile.target_industries == []
 
     ops_profile = extract_student_profile(
         "我是职场人想跳槽到小红书或B站，方向是内容运营和增长运营",

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -25,10 +26,23 @@ from mentor_agent.simple_extractor import (
     extract_simple_mentor_batch,
     make_simple_batch_result,
 )
+from mentor_agent.tag_taxonomy import TagTaxonomy, load_tag_taxonomy
 
 
 class Stage4RequestError(ValueError):
     """Safe request error whose message contains no source record content."""
+
+
+def _boolean_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{name} must be 'true' or 'false'")
 
 
 load_dotenv()
@@ -36,11 +50,19 @@ MODEL_NAME = os.getenv("MODEL_NAME")
 MODEL_SERVICE_NAME = os.getenv("MODEL_SERVICE_NAME")
 SANDBOX_NAME = os.getenv("SANDBOX_NAME")
 EXTRACTION_MODE = os.getenv("EXTRACTION_MODE", "simple").strip().lower()
+ENABLE_STANDARD_TAGS = _boolean_env("ENABLE_STANDARD_TAGS", False)
+TAG_TAXONOMY_PATH = Path(
+    os.getenv("TAG_TAXONOMY_PATH", "configs/职位类型_2.txt")
+)
 
 if not MODEL_SERVICE_NAME:
     raise ValueError("MODEL_SERVICE_NAME is required")
 if EXTRACTION_MODE not in {"simple", "full"}:
     raise ValueError("EXTRACTION_MODE must be 'simple' or 'full'")
+
+tag_taxonomy: TagTaxonomy | None = None
+if EXTRACTION_MODE == "simple" and ENABLE_STANDARD_TAGS:
+    tag_taxonomy = load_tag_taxonomy(TAG_TAXONOMY_PATH)
 
 model_client = model(MODEL_SERVICE_NAME, model=MODEL_NAME)
 
@@ -122,6 +144,7 @@ def invoke_agent(request: AgentRequest) -> str:
                 model_client,
                 model_service_name=MODEL_SERVICE_NAME,
                 model_name=MODEL_NAME,
+                taxonomy=tag_taxonomy,
             )
             return make_simple_batch_result(results).model_dump_json(by_alias=True)
 
@@ -140,6 +163,7 @@ def invoke_agent(request: AgentRequest) -> str:
                 model_client,
                 model_service_name=MODEL_SERVICE_NAME,
                 model_name=MODEL_NAME,
+                taxonomy=tag_taxonomy,
             )
         return result.model_dump_json(by_alias=True)
     except Stage4RequestError:

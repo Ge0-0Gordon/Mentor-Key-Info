@@ -41,6 +41,8 @@ def stage4_main(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("MODEL_SERVICE_NAME", "stage4-test-service")
     monkeypatch.setenv("MODEL_NAME", "stage4-test-model")
     monkeypatch.delenv("EXTRACTION_MODE", raising=False)
+    monkeypatch.delenv("ENABLE_STANDARD_TAGS", raising=False)
+    monkeypatch.delenv("TAG_TAXONOMY_PATH", raising=False)
 
     import agentrun.integration.langchain as langchain_integration
 
@@ -117,6 +119,82 @@ def test_valid_mentor_input_returns_simple_result_json_by_default(stage4_main) -
     assert result.processing.model_name == "stage4-test-model"
     assert len(fake_model.calls) == 1
     assert result.schema_version == "simple-v1"
+
+
+def test_tagged_simple_mode_loads_taxonomy_and_returns_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_model = FakeChatModel(
+        response={
+            "position_tags": [
+                {
+                    "tag": "产品经理",
+                    "relation_type": "firsthand_role",
+                    "confidence": 0.9,
+                    "raw_keywords": ["产品负责人"],
+                    "evidence": "产品负责人",
+                }
+            ]
+        }
+    )
+
+    def fake_model_factory(name: str, **kwargs: Any) -> FakeChatModel:
+        return fake_model
+
+    monkeypatch.setenv("MODEL_SERVICE_NAME", "stage4-test-service")
+    monkeypatch.setenv("EXTRACTION_MODE", "simple")
+    monkeypatch.setenv("ENABLE_STANDARD_TAGS", "true")
+    monkeypatch.setenv("TAG_TAXONOMY_PATH", "configs/职位类型_2.txt")
+    import agentrun.integration.langchain as langchain_integration
+
+    monkeypatch.setattr(langchain_integration, "model", fake_model_factory)
+    sys.modules.pop("main", None)
+    module = importlib.import_module("main")
+    try:
+        content = module.invoke_agent(
+            _request(_mentor_input().model_dump_json(by_alias=True))
+        )
+        result = SimpleMentorResult.model_validate_json(content)
+    finally:
+        sys.modules.pop("main", None)
+
+    assert result.standard_tags_enabled is True
+    assert result.taxonomy_hash == module.tag_taxonomy.taxonomy_hash
+    assert result.prompt_version == "mentor-simple-tagged-v1"
+
+
+def test_invalid_standard_tags_boolean_fails_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MODEL_SERVICE_NAME", "stage4-test-service")
+    monkeypatch.setenv("ENABLE_STANDARD_TAGS", "yes")
+    sys.modules.pop("main", None)
+    with pytest.raises(ValueError, match="ENABLE_STANDARD_TAGS"):
+        importlib.import_module("main")
+    sys.modules.pop("main", None)
+
+
+def test_full_mode_does_not_load_taxonomy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_model = FakeChatModel()
+
+    def fake_model_factory(name: str, **kwargs: Any) -> FakeChatModel:
+        return fake_model
+
+    monkeypatch.setenv("MODEL_SERVICE_NAME", "stage4-test-service")
+    monkeypatch.setenv("EXTRACTION_MODE", "full")
+    monkeypatch.setenv("ENABLE_STANDARD_TAGS", "true")
+    monkeypatch.setenv("TAG_TAXONOMY_PATH", "missing-taxonomy.txt")
+    import agentrun.integration.langchain as langchain_integration
+
+    monkeypatch.setattr(langchain_integration, "model", fake_model_factory)
+    sys.modules.pop("main", None)
+    module = importlib.import_module("main")
+    try:
+        assert module.tag_taxonomy is None
+    finally:
+        sys.modules.pop("main", None)
 
 
 def test_full_mode_returns_mentor_result_json(
