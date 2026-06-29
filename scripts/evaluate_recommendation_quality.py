@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=10, help="Top K mentor cards to evaluate.")
     parser.add_argument(
         "--semantic",
-        choices=["none", "fake", "real", "local"],
+        choices=["none", "fake", "real", "local", "local-scoped-bonus"],
         default="none",
         help="Semantic mode. local uses sentence-transformers; real requires a configured embedding provider.",
     )
@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     embedding_cache = args.embedding_cache
-    if args.semantic == "local" and embedding_cache is None:
+    if args.semantic in {"local", "local-scoped-bonus"} and embedding_cache is None:
         embedding_cache = default_local_embedding_cache_path(args.embedding_model)
     try:
         summary = run_quality_evaluation(
@@ -75,7 +75,7 @@ def main() -> int:
         if args.semantic == "real" and "real embedding provider not available" in str(exc):
             print("real embedding provider not available", file=sys.stderr)
             return 2
-        if args.semantic == "local" and "semantic local" in str(exc):
+        if args.semantic in {"local", "local-scoped-bonus"} and "semantic local" in str(exc):
             print(str(exc), file=sys.stderr)
             return 2
         raise

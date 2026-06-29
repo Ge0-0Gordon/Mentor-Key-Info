@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import cmp_to_key
 from typing import Iterable
 
 from .aliases import AliasIndex, normalize_text
@@ -29,6 +30,9 @@ WEIGHTS = {
 
 MENTOR_QUALITY_FACTOR = 1.0
 AVAILABILITY_FACTOR = 1.0
+ROLE_SEMANTIC_RAW_MIN = 0.50
+HELP_SEMANTIC_RAW_MIN = 0.45
+SCOPED_SEMANTIC_PERCENTILE_MIN = 60.0
 
 
 def _has_cjk(value: str) -> bool:
@@ -56,6 +60,20 @@ class SemanticContext:
     embedding_model: str = "fake-hash-v1"
     cache: EmbeddingCache | None = None
     query_embedding: list[float] | None = None
+    role_query_embedding: list[float] | None = None
+    help_query_embedding: list[float] | None = None
+    global_query_embedding: list[float] | None = None
+    scoped_scores_by_mentor_id: dict[str, "ScopedSemanticScores"] = field(default_factory=dict)
+
+
+@dataclass
+class ScopedSemanticScores:
+    role_raw_cosine: float | None = None
+    role_percentile: float | None = None
+    help_raw_cosine: float | None = None
+    help_percentile: float | None = None
+    global_raw_cosine: float | None = None
+    global_percentile: float | None = None
 
 
 def _best_match_for_term(
@@ -199,6 +217,144 @@ def build_student_search_text(profile: StudentProfile) -> str:
     return " ".join(str(part) for part in parts if part)
 
 
+def build_role_student_text(profile: StudentProfile) -> str:
+    parts = [*profile.target_roles, *profile.keywords, profile.raw_query]
+    return " ".join(str(part) for part in parts if part)
+
+
+def build_help_student_text(profile: StudentProfile) -> str:
+    parts = [*profile.needed_help, *profile.preferred_background, *profile.keywords]
+    return " ".join(str(part) for part in parts if part)
+
+
+def _provider_method(method: str) -> str:
+    return "local" if method == "local-scoped-bonus" else method
+
+
+def _mentor_role_text(document: MentorDocument) -> str:
+    extraction = document.result.extraction
+    parts = [
+        *extraction.roles,
+        *extraction.keywords,
+        *extraction.highlights,
+        extraction.summary or "",
+    ]
+    return " ".join(str(part) for part in parts if part)
+
+
+def _mentor_help_text(document: MentorDocument) -> str:
+    extraction = document.result.extraction
+    parts = [
+        *extraction.skills,
+        *extraction.target_mentees,
+        *extraction.highlights,
+        extraction.summary or "",
+    ]
+    return " ".join(str(part) for part in parts if part)
+
+
+def _role_text_quality(document: MentorDocument) -> str:
+    extraction = document.result.extraction
+    if extraction.roles:
+        return "strong"
+    if extraction.keywords or extraction.highlights or extraction.summary:
+        return "weak"
+    return "none"
+
+
+def _cached_embedding(
+    document: MentorDocument,
+    *,
+    text: str,
+    context: SemanticContext,
+    model_suffix: str = "",
+) -> list[float]:
+    result = document.result
+    model_key = f"{context.embedding_model}{model_suffix}"
+    embedding = context.cache.get(result.mentor_id, result.record_hash, model_key) if context.cache else None
+    if embedding is None:
+        embedding = get_embedding(
+            text,
+            method=_provider_method(context.method),
+            embedding_model=context.embedding_model,
+        )
+        if context.cache:
+            context.cache.set(result.mentor_id, result.record_hash, model_key, embedding)
+    return embedding
+
+
+def _percentiles(raw_scores: dict[str, float | None]) -> dict[str, float | None]:
+    valid = [(mentor_id, score) for mentor_id, score in raw_scores.items() if score is not None]
+    if not valid:
+        return {mentor_id: None for mentor_id in raw_scores}
+    if len(valid) == 1:
+        return {mentor_id: 100.0 for mentor_id in raw_scores}
+    sorted_scores = sorted(valid, key=lambda item: item[1])
+    ranks: dict[str, float] = {}
+    index = 0
+    last_index = len(sorted_scores) - 1
+    while index < len(sorted_scores):
+        end = index
+        while end + 1 < len(sorted_scores) and sorted_scores[end + 1][1] == sorted_scores[index][1]:
+            end += 1
+        average_rank = (index + end) / 2.0
+        percentile = round(100.0 * average_rank / last_index, 2)
+        for mentor_id, _ in sorted_scores[index : end + 1]:
+            ranks[mentor_id] = percentile
+        index = end + 1
+    return {mentor_id: ranks.get(mentor_id) for mentor_id in raw_scores}
+
+
+def _prepare_scoped_semantic_scores(
+    documents: list[MentorDocument],
+    profile: StudentProfile,
+    context: SemanticContext,
+) -> None:
+    if context.method != "local-scoped-bonus":
+        return
+    role_raw: dict[str, float | None] = {}
+    help_raw: dict[str, float | None] = {}
+    global_raw: dict[str, float | None] = {}
+    for document in documents:
+        mentor_id = document.result.mentor_id
+        if context.role_query_embedding is not None:
+            role_raw[mentor_id] = cosine_similarity(
+                context.role_query_embedding,
+                _cached_embedding(document, text=_mentor_role_text(document), context=context, model_suffix=":role"),
+            )
+        else:
+            role_raw[mentor_id] = None
+        if context.help_query_embedding is not None:
+            help_raw[mentor_id] = cosine_similarity(
+                context.help_query_embedding,
+                _cached_embedding(document, text=_mentor_help_text(document), context=context, model_suffix=":help"),
+            )
+        else:
+            help_raw[mentor_id] = None
+        if context.global_query_embedding is not None:
+            global_raw[mentor_id] = cosine_similarity(
+                context.global_query_embedding,
+                _cached_embedding(document, text=document.mentor_search_text, context=context, model_suffix=":global"),
+            )
+        else:
+            global_raw[mentor_id] = None
+
+    role_percentiles = _percentiles(role_raw)
+    help_percentiles = _percentiles(help_raw)
+    global_percentiles = _percentiles(global_raw)
+    context.scoped_scores_by_mentor_id = {
+        document.result.mentor_id: ScopedSemanticScores(
+            role_raw_cosine=role_raw.get(document.result.mentor_id),
+            role_percentile=role_percentiles.get(document.result.mentor_id),
+            help_raw_cosine=help_raw.get(document.result.mentor_id),
+            help_percentile=help_percentiles.get(document.result.mentor_id),
+            global_raw_cosine=global_raw.get(document.result.mentor_id),
+            global_percentile=global_percentiles.get(document.result.mentor_id),
+        )
+        for document in documents
+    }
+
+
 def _semantic_score(document: MentorDocument, context: SemanticContext | None) -> float | None:
     if not context or context.method == "none" or context.query_embedding is None:
         return None
@@ -207,13 +363,62 @@ def _semantic_score(document: MentorDocument, context: SemanticContext | None) -
     if embedding is None:
         embedding = get_embedding(
             document.mentor_search_text,
-            method=context.method,
+            method=_provider_method(context.method),
             embedding_model=context.embedding_model,
         )
         if context.cache:
             context.cache.set(result.mentor_id, result.record_hash, context.embedding_model, embedding)
     similarity = cosine_similarity(context.query_embedding, embedding)
     return round(max(0.0, min(100.0, (similarity + 1.0) * 50.0)), 2)
+
+
+def _score_from_cosine(raw_cosine: float | None) -> float | None:
+    if raw_cosine is None:
+        return None
+    return round(max(0.0, min(100.0, (raw_cosine + 1.0) * 50.0)), 2)
+
+
+def _role_semantic_bonus(
+    *,
+    profile: StudentProfile,
+    rule_role_match: float,
+    scoped: ScopedSemanticScores | None,
+    text_quality: str,
+) -> float:
+    if not profile.target_roles or not scoped or scoped.role_percentile is None:
+        return 0.0
+    if scoped.role_raw_cosine is None or scoped.role_raw_cosine < ROLE_SEMANTIC_RAW_MIN:
+        return 0.0
+    if scoped.role_percentile < SCOPED_SEMANTIC_PERCENTILE_MIN:
+        return 0.0
+    if rule_role_match > 0:
+        cap, weight = 15.0, 0.20
+    elif text_quality == "strong":
+        cap, weight = 35.0, 0.35
+    elif text_quality == "weak":
+        cap, weight = 22.0, 0.25
+    else:
+        return 0.0
+    return round(min(cap, weight * scoped.role_percentile), 2)
+
+
+def _help_semantic_bonus(
+    *,
+    profile: StudentProfile,
+    rule_skill_match: float,
+    scoped: ScopedSemanticScores | None,
+) -> float:
+    if not (profile.needed_help or profile.preferred_background) or not scoped or scoped.help_percentile is None:
+        return 0.0
+    if scoped.help_raw_cosine is None or scoped.help_raw_cosine < HELP_SEMANTIC_RAW_MIN:
+        return 0.0
+    if scoped.help_percentile < SCOPED_SEMANTIC_PERCENTILE_MIN:
+        return 0.0
+    if rule_skill_match > 0:
+        cap, weight = 20.0, 0.25
+    else:
+        cap, weight = 35.0, 0.35
+    return round(min(cap, weight * scoped.help_percentile), 2)
 
 
 def _parse_years(value: object) -> float | None:
@@ -439,21 +644,46 @@ def score_mentor(
     }
     structured_total = _weighted_category_total(structured_scores, active_weights)
     raw_text_total = _weighted_category_total(raw_text_scores, active_weights)
-    semantic_score = _semantic_score(document, semantic_context)
+    scoped_semantic = (
+        semantic_context.scoped_scores_by_mentor_id.get(result.mentor_id)
+        if semantic_context and semantic_context.method == "local-scoped-bonus"
+        else None
+    )
+    semantic_score = (
+        _score_from_cosine(scoped_semantic.global_raw_cosine)
+        if scoped_semantic
+        else _semantic_score(document, semantic_context)
+    )
+    rule_role_match = scores["role_match"]
+    rule_skill_match = scores["skill_or_help_match"]
+    role_bonus = _role_semantic_bonus(
+        profile=profile,
+        rule_role_match=rule_role_match,
+        scoped=scoped_semantic,
+        text_quality=_role_text_quality(document),
+    )
+    help_bonus = _help_semantic_bonus(
+        profile=profile,
+        rule_skill_match=rule_skill_match,
+        scoped=scoped_semantic,
+    )
+    role_match_final = min(100.0, rule_role_match + role_bonus)
+    skill_match_final = min(100.0, rule_skill_match + help_bonus)
+    effective_semantic_score = None if scoped_semantic else semantic_score
     years_score = _years_match(profile.work_years, result.original_fields.career_years, document)
     score_inputs: dict[str, float | None] = {
         "company_match": scores["company_match"],
-        "role_match": scores["role_match"],
-        "skill_or_help_match": scores["skill_or_help_match"],
+        "role_match": role_match_final,
+        "skill_or_help_match": skill_match_final,
         "industry_match": scores["industry_match"],
         "target_mentee_match": scores["target_mentee_match"],
         "years_match": years_score,
-        "semantic_match": semantic_score,
+        "semantic_match": effective_semantic_score,
     }
     active_terms = {
         "company_match": bool(profile.target_companies),
         "role_match": bool(profile.target_roles),
-        "skill_or_help_match": bool(profile.needed_help),
+        "skill_or_help_match": bool(profile.needed_help or (scoped_semantic and profile.preferred_background)),
         "industry_match": bool(profile.target_industries),
         "target_mentee_match": bool(profile.current_stage),
         "years_match": profile.work_years is not None,
@@ -462,9 +692,9 @@ def score_mentor(
     total = _final_score(relevance_score)
     breakdown = RuleScoreBreakdown(
         company_match=round(scores["company_match"], 2),
-        role_match=round(scores["role_match"], 2),
-        skill_match=round(scores["skill_or_help_match"], 2),
-        skill_or_help_match=round(scores["skill_or_help_match"], 2),
+        role_match=round(role_match_final, 2),
+        skill_match=round(skill_match_final, 2),
+        skill_or_help_match=round(skill_match_final, 2),
         stage_match=round(scores["target_mentee_match"], 2),
         target_mentee_match=round(scores["target_mentee_match"], 2),
         years_match=round(years_score, 2),
@@ -473,6 +703,26 @@ def score_mentor(
         keyword_match=round(scores["keyword_match"], 2),
         raw_text_match=round(raw_text_total, 2),
         semantic_match=semantic_score,
+        rule_role_match=round(rule_role_match, 2) if scoped_semantic else None,
+        role_semantic_raw_cosine=round(scoped_semantic.role_raw_cosine, 4)
+        if scoped_semantic and scoped_semantic.role_raw_cosine is not None
+        else None,
+        role_semantic_percentile=round(scoped_semantic.role_percentile, 2)
+        if scoped_semantic and scoped_semantic.role_percentile is not None
+        else None,
+        role_semantic_bonus=role_bonus if scoped_semantic else None,
+        role_match_final=round(role_match_final, 2) if scoped_semantic else None,
+        rule_skill_match=round(rule_skill_match, 2) if scoped_semantic else None,
+        help_semantic_raw_cosine=round(scoped_semantic.help_raw_cosine, 4)
+        if scoped_semantic and scoped_semantic.help_raw_cosine is not None
+        else None,
+        help_semantic_percentile=round(scoped_semantic.help_percentile, 2)
+        if scoped_semantic and scoped_semantic.help_percentile is not None
+        else None,
+        help_semantic_bonus=help_bonus if scoped_semantic else None,
+        skill_match_final=round(skill_match_final, 2) if scoped_semantic else None,
+        global_semantic_score=semantic_score if scoped_semantic else None,
+        semantic_fusion_mode="scoped_bonus" if scoped_semantic else None,
         structured_score=round(structured_total, 2),
         raw_text_score=round(raw_text_total, 2),
         semantic_score=semantic_score,
@@ -516,28 +766,62 @@ def rank_candidates(
     candidate_pool_size: int = 30,
     semantic_context: SemanticContext | None = None,
 ) -> list[MentorCandidateCard]:
+    document_list = list(documents)
+    if semantic_context and semantic_context.method == "local-scoped-bonus":
+        _prepare_scoped_semantic_scores(document_list, profile, semantic_context)
     cards = [
         score_mentor(document, profile, aliases, semantic_context=semantic_context)
-        for document in documents
+        for document in document_list
     ]
-    cards.sort(
-        key=lambda card: (
-            card.rule_score,
-            card.structured_score,
-            card.raw_text_score,
-            len(card.matched_signals.companies),
-            len(card.matched_signals.skills),
-            len(card.matched_signals.target_mentees),
-        ),
-        reverse=True,
-    )
+
+    if semantic_context and semantic_context.method == "local-scoped-bonus":
+        def compare(left: MentorCandidateCard, right: MentorCandidateCard) -> int:
+            left_key = (
+                left.rule_score,
+                left.structured_score,
+                left.raw_text_score,
+                len(left.matched_signals.companies),
+                len(left.matched_signals.skills),
+                len(left.matched_signals.target_mentees),
+            )
+            right_key = (
+                right.rule_score,
+                right.structured_score,
+                right.raw_text_score,
+                len(right.matched_signals.companies),
+                len(right.matched_signals.skills),
+                len(right.matched_signals.target_mentees),
+            )
+            if abs(left.final_score - right.final_score) <= 3:
+                left_key = (*left_key, left.score_breakdown.global_semantic_score or 0.0)
+                right_key = (*right_key, right.score_breakdown.global_semantic_score or 0.0)
+            if left_key == right_key:
+                return 0
+            return -1 if left_key > right_key else 1
+
+        cards.sort(key=cmp_to_key(compare))
+    else:
+        cards.sort(
+            key=lambda card: (
+                card.rule_score,
+                card.structured_score,
+                card.raw_text_score,
+                len(card.matched_signals.companies),
+                len(card.matched_signals.skills),
+                len(card.matched_signals.target_mentees),
+            ),
+            reverse=True,
+        )
     return cards[:candidate_pool_size]
 
 
 __all__ = [
     "WEIGHTS",
     "SemanticContext",
+    "ScopedSemanticScores",
+    "build_help_student_text",
     "build_reasons",
+    "build_role_student_text",
     "build_student_search_text",
     "possible_gap",
     "rank_candidates",

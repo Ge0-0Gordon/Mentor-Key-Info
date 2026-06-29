@@ -16,7 +16,7 @@ from .embeddings import (
 from .formatter import build_match_result
 from .mentor_index import MentorDocument, load_mentor_documents
 from .schemas import MatchResult, StudentProfile
-from .scorer import SemanticContext, build_student_search_text, rank_candidates
+from .scorer import SemanticContext, build_help_student_text, build_role_student_text, build_student_search_text, rank_candidates
 
 
 @dataclass
@@ -41,16 +41,17 @@ class RecommendationEngine:
         self.documents = documents
         self.aliases = aliases
         self.semantic_mode = semantic_mode
+        provider_mode = "local" if semantic_mode == "local-scoped-bonus" else semantic_mode
         self.embedding_model = embedding_model or (
             FAKE_EMBEDDING_MODEL
-            if semantic_mode == "fake"
+            if provider_mode == "fake"
             else DEFAULT_LOCAL_EMBEDDING_MODEL
-            if semantic_mode == "local"
+            if provider_mode == "local"
             else None
         )
         if embedding_cache_path:
             self.embedding_cache_path = Path(embedding_cache_path)
-        elif semantic_mode == "local":
+        elif provider_mode == "local":
             self.embedding_cache_path = default_local_embedding_cache_path(self.embedding_model)
         else:
             self.embedding_cache_path = None
@@ -80,16 +81,35 @@ class RecommendationEngine:
         if self.semantic_mode != "none":
             resolved_embedding_model = resolved_embedding_model or self.semantic_mode
             cache = EmbeddingCache(self.embedding_cache_path)
+            provider_mode = "local" if self.semantic_mode == "local-scoped-bonus" else self.semantic_mode
             query_embedding = get_embedding(
                 build_student_search_text(profile),
-                method=self.semantic_mode,
+                method=provider_mode,
                 embedding_model=resolved_embedding_model,
             )
+            role_query_embedding = None
+            help_query_embedding = None
+            if self.semantic_mode == "local-scoped-bonus":
+                if profile.target_roles:
+                    role_query_embedding = get_embedding(
+                        build_role_student_text(profile),
+                        method=provider_mode,
+                        embedding_model=resolved_embedding_model,
+                    )
+                if profile.needed_help or profile.preferred_background:
+                    help_query_embedding = get_embedding(
+                        build_help_student_text(profile),
+                        method=provider_mode,
+                        embedding_model=resolved_embedding_model,
+                    )
             semantic_context = SemanticContext(
                 method=self.semantic_mode,
                 embedding_model=resolved_embedding_model,
                 cache=cache,
                 query_embedding=query_embedding,
+                role_query_embedding=role_query_embedding,
+                help_query_embedding=help_query_embedding,
+                global_query_embedding=query_embedding,
             )
         cards = rank_candidates(
             self.documents,

@@ -240,6 +240,62 @@ def test_run_match_semantic_local_uses_cache_and_metadata(tmp_path, monkeypatch)
     assert cache_path.exists()
 
 
+def test_run_match_semantic_local_scoped_bonus_uses_field_debug(tmp_path, monkeypatch):
+    embeddings._LOCAL_MODELS.clear()
+
+    class FakeModel:
+        def __init__(self, model_name):
+            self.model_name = model_name
+
+        def encode(self, text, normalize_embeddings=True):
+            text = str(text)
+            if "summary-1" in text:
+                return [1.0, 0.0, 0.0]
+            if "summary-2" in text:
+                return [0.0, 1.0, 0.0]
+            return [1.0, 0.0, 0.0]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sentence_transformers",
+        types.SimpleNamespace(SentenceTransformer=FakeModel),
+    )
+    aliases = _write_aliases(tmp_path / "aliases.json")
+    row1 = _row("service_mentor:1", summary="summary-1")
+    row2 = _row("service_mentor:2", summary="summary-2")
+    row2["extraction"]["roles"] = []
+    row2["extraction"]["skills"] = []
+    mentors = _write_results(tmp_path / "mentor_results.jsonl", [row1, row2])
+    cache_path = tmp_path / "mentor_embeddings_bge_m3.json"
+
+    result, _ = run_match(
+        mentors_path=mentors,
+        student_profile={
+            "raw_query": "summary-1",
+            "target_roles": row1["extraction"]["roles"],
+            "needed_help": row1["extraction"]["skills"],
+            "keywords": ["summary-1"],
+        },
+        top_k=2,
+        aliases_path=aliases,
+        semantic="local-scoped-bonus",
+        embedding_model="BAAI/bge-m3",
+        embedding_cache_path=cache_path,
+    )
+
+    breakdown = result.results[0].debug.score_breakdown
+    assert result.semantic.enabled is True
+    assert result.semantic.method == "local-scoped-bonus"
+    assert breakdown.semantic_fusion_mode == "scoped_bonus"
+    assert breakdown.rule_role_match is not None
+    assert breakdown.role_semantic_percentile is not None
+    assert breakdown.role_match_final >= breakdown.rule_role_match
+    assert breakdown.rule_skill_match is not None
+    assert breakdown.skill_match_final >= breakdown.rule_skill_match
+    assert breakdown.global_semantic_score is not None
+    assert cache_path.exists()
+
+
 def test_recommendation_engine_returns_all_mentors_and_years_match(tmp_path):
     aliases = _write_aliases(tmp_path / "aliases.json")
     mentors = _write_results(tmp_path / "mentor_results.jsonl", [_row("service_mentor:1"), _row("service_mentor:2")])

@@ -63,6 +63,18 @@ class RuleScoreBreakdown(MatchStrictModel):
     keyword_match: float = 0
     raw_text_match: float = 0
     semantic_match: float | None = None
+    rule_role_match: float | None = None
+    role_semantic_raw_cosine: float | None = None
+    role_semantic_percentile: float | None = None
+    role_semantic_bonus: float | None = None
+    role_match_final: float | None = None
+    rule_skill_match: float | None = None
+    help_semantic_raw_cosine: float | None = None
+    help_semantic_percentile: float | None = None
+    help_semantic_bonus: float | None = None
+    skill_match_final: float | None = None
+    global_semantic_score: float | None = None
+    semantic_fusion_mode: Literal["scoped_bonus"] | None = None
     structured_score: float = 0
     raw_text_score: float = 0
     semantic_score: float | None = None
@@ -150,7 +162,7 @@ class MatchRerankMetadata(MatchStrictModel):
 
 class MatchSemanticMetadata(MatchStrictModel):
     enabled: bool = False
-    method: Literal["none", "fake", "real", "local"] = "none"
+    method: Literal["none", "fake", "real", "local", "local-scoped-bonus"] = "none"
     embedding_model: str | None = None
     cache_path: str | None = None
     cache_hit_count: int = 0

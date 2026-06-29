@@ -542,7 +542,13 @@ def run_quality_evaluation(
         aliases_path,
         semantic_mode=semantic,
         embedding_cache_path=embedding_cache_path
-        or (default_local_embedding_cache_path(embedding_model) if semantic == "local" else output_path / "mentor_embeddings.json" if semantic != "none" else None),
+        or (
+            default_local_embedding_cache_path(embedding_model)
+            if semantic in {"local", "local-scoped-bonus"}
+            else output_path / "mentor_embeddings.json"
+            if semantic != "none"
+            else None
+        ),
         embedding_model=embedding_model,
     )
 

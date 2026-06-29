@@ -447,3 +447,26 @@ def test_evaluate_cli_parses_semantic_local(monkeypatch):
     assert args.semantic == "local"
     assert args.embedding_model == "BAAI/bge-m3"
     assert args.embedding_cache.as_posix().endswith("mentor_embeddings_bge_m3.json")
+
+
+def test_evaluate_cli_parses_semantic_local_scoped_bonus(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "evaluate_recommendation_quality.py",
+            "--mentors",
+            "outputs/runs/simple_full_run_20260625_123834/mentor_results.jsonl",
+            "--semantic",
+            "local-scoped-bonus",
+            "--embedding-model",
+            "BAAI/bge-m3",
+            "--embedding-cache",
+            "outputs/matching_embeddings/mentor_embeddings_bge_m3.json",
+        ],
+    )
+
+    args = parse_eval_args()
+
+    assert args.semantic == "local-scoped-bonus"
+    assert args.embedding_model == "BAAI/bge-m3"
+    assert args.embedding_cache.as_posix().endswith("mentor_embeddings_bge_m3.json")

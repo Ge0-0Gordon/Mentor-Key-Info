@@ -42,7 +42,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--aliases", type=Path, default=DEFAULT_ALIAS_PATH, help="Alias JSON path.")
     parser.add_argument("--show-score", action="store_true", help="Show final_score in Markdown table.")
-    parser.add_argument("--semantic", choices=["none", "fake", "real", "local"], default="none", help="Optional semantic scoring method.")
+    parser.add_argument(
+        "--semantic",
+        choices=["none", "fake", "real", "local", "local-scoped-bonus"],
+        default="none",
+        help="Optional semantic scoring method.",
+    )
     parser.add_argument(
         "--embedding-cache",
         type=Path,
@@ -161,7 +166,8 @@ def run_match(
         mentors_path,
         aliases_path,
         semantic_mode=semantic,
-        embedding_cache_path=embedding_cache_path or (default_local_embedding_cache_path(embedding_model) if semantic == "local" else None),
+        embedding_cache_path=embedding_cache_path
+        or (default_local_embedding_cache_path(embedding_model) if semantic in {"local", "local-scoped-bonus"} else None),
         embedding_model=embedding_model,
     )
     artifacts = engine.rank(profile)
